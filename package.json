@@ -1,0 +1,40 @@
+{
+  "name": "riffcut",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "apps/*",
+    "workers/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "node --env-file=.env --import tsx apps/api/src/main.ts",
+    "dev:worker": "node --env-file=.env --import tsx workers/workflow-worker/src/main.ts",
+    "db:migrate": "node --env-file=.env --import tsx infra/scripts/migrate.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json && node --input-type=module -e \"import { cpSync } from 'node:fs'; cpSync('infra/migrations', 'dist/infra/migrations', { recursive: true });\"",
+    "lint": "eslint .",
+    "test": "vitest run --exclude 'tests/integration/**'",
+    "test:integration": "vitest run tests/integration/m0.test.ts"
+  },
+  "dependencies": {
+    "bullmq": "^5.81.5",
+    "fastify": "^5.12.7",
+    "ioredis": "^5.11.1",
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^24.19.2",
+    "@types/pg": "^8.23.1",
+    "eslint": "^9.39.5",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.0",
+    "vitest": "^5.0.5"
+  }
+}

@@ -1,3 +1,9 @@
 .agents/
 AGENTS.md
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+coverage/
 docs/
