@@ -1,6 +1,6 @@
 # Riffcut
 
-A personal, Thai-first tool for turning authorized source media into short-form video. This repository implements **M0 infrastructure and M1 authorized MP4 ingestion**. Script, voice and final video generation follow in later milestones.
+A personal, Thai-first tool for turning authorized source media into short-form video. This repository implements **M0 infrastructure, M1 authorized MP4 ingestion, and M2 supplied transcripts with source-grounded script versions**. Voice and final video generation follow in later milestones.
 
 ## Requirements
 
@@ -62,6 +62,43 @@ Object keys, filesystem paths and credentials are omitted from API responses. `s
 
 Local MinIO is built from the official pinned `RELEASE.2025-10-15T17-29-55Z` source and includes its AGPL license. Its repository is archived; this container is a local development dependency, not a maintained production-storage recommendation. [Upstream source and maintenance status](https://github.com/minio/minio), [pinned release](https://github.com/minio/minio/releases/tag/RELEASE.2025-10-15T17-29-55Z). First build downloads/compiles Go dependencies; subsequent builds use Docker cache. The media and storage image builds include no `.env` or source media.
 
+## Transcripts and scripts (M2)
+
+M2 accepts a **user-supplied timed Thai transcript** for a ready source; automatic speech recognition and scene analysis are not implemented. A transcript creates an immutable Source Knowledge Pack with source/asset provenance, server-generated segment IDs and a version number. Another submission appends a new pack; old script evidence stays attached to its original pack. Intervals must be ordered, non-overlapping integer milliseconds inside the measured source. Limits: 500 segments, 2000 characters per segment, 40000 total characters, and the existing 64 KiB JSON request limit (whichever is reached first).
+
+```powershell
+# Replace sourceId and segment timings/text with your actual source/transcript.
+$sourceId = 'YOUR_SOURCE_UUID'
+$transcript = @{ language = 'th'; segments = @(@{ startMs = 0; endMs = 1000; text = 'ข้อความจากวิดีโอต้นฉบับ' }) } | ConvertTo-Json -Depth 10
+$pack = Invoke-RestMethod "http://127.0.0.1:3001/api/projects/$($project.id)/sources/$sourceId/transcripts" -Method Post -ContentType application/json -Body $transcript
+Invoke-RestMethod "http://127.0.0.1:3001/api/projects/$($project.id)/knowledge-packs/$($pack.id)"
+```
+
+Both **OpenAI API** (`provider: "openai"`) and **Claude API** (`provider: "anthropic"`) are supported through separate typed adapters. In your untracked `.env`, configure the providers you want:
+
+```dotenv
+OPENAI_API_KEY=your-server-side-key
+OPENAI_MODEL=your-supported-structured-output-model-id
+ANTHROPIC_API_KEY=your-server-side-key
+ANTHROPIC_MODEL=your-supported-structured-output-model-id
+```
+
+Use actual model IDs available to your provider account; no model is chosen automatically. Restart the API and worker after changing configuration. Missing/partial settings disable that provider's new generation requests (503), while transcripts, reads and edits remain available. Keys are never returned to clients. Generation sends transcript text to the selected provider; submit a generation request only for content you intend to process there. These adapters follow [OpenAI Responses structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs) and [Claude Messages structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs).
+
+```powershell
+$input = @{ kind = 'generate_script'; knowledgePackId = $pack.id; provider = 'openai'; targetDurationSeconds = 30; style = 'summary' } | ConvertTo-Json
+$job = Invoke-RestMethod "http://127.0.0.1:3001/api/projects/$($project.id)/jobs" -Method Post -ContentType application/json -Headers @{ 'Idempotency-Key' = 'script-1' } -Body $input
+Invoke-RestMethod "http://127.0.0.1:3001/api/jobs/$($job.id)"
+# Once completed, result.scriptId identifies the generated script version.
+Invoke-RestMethod "http://127.0.0.1:3001/api/projects/$($project.id)/scripts"
+```
+
+Targets are 30/60/90 seconds; styles are summary/explainer/story. Each sentence requires valid source segment IDs, a verbatim evidence quote for each reference, and estimated duration; total estimates must stay within 20% of the target. The validator proves reference/quote consistency, not semantic truth or actual voice duration. Review generated claims before publication. Untrusted transcript instructions are passed as data, and models have no tools/shell access.
+
+Read a version with `GET /api/scripts/:id`. `PATCH /api/scripts/:id` accepts `{ "title": "...", "segments": [...] }` and returns 201 with a new immutable version; retain valid sourceRefs/evidence/timings. A stale base returns 409. Source transcripts and previous script versions remain intact.
+
+Generation uses the existing background queue. Model settings are snapshotted when the job is accepted; matching idempotent replays return the original job even after model rotation or credential removal. Changing client input under the same key is 409. Each job records the external call before sending it and caches a validated result before script persistence. SQL retries reuse the cache. A prior uncertain/failed external call is not automatically repeated; inspect the failed job and explicitly choose a new key to try again. Each new key can incur another provider charge. Requests have a 45-second deadline, 4000 output-token cap and 256 KiB response cap. Successful calls record known token/cache usage; monetary cost remains null, and failed/uncertain calls may still be billed by the provider.
+
 ## Validation
 
 ```powershell
@@ -86,12 +123,21 @@ To include real M1 media/storage checks, use the same dedicated test database, t
 
 ```powershell
 $env:RUN_MEDIA_INTEGRATION = '1'
-node --env-file=.env node_modules/vitest/vitest.mjs run tests/integration/m0.test.ts tests/integration/m1.test.ts
+node --env-file=.env node_modules/vitest/vitest.mjs run tests/integration/m0.test.ts tests/integration/m1.test.ts tests/integration/m2.test.ts
 ```
 
 M1 tests generate their own authorized media and random private test buckets. Cleanup deletes only test-owned records/objects/buckets. Without `RUN_MEDIA_INTEGRATION=1`, M1 explicitly skips and does not create service connections. Existing M0 test service variables remain required for M0.
 
 M1 verified on 2026-10-27: real generated MP4 files with and without audio, private byte-for-byte storage, measured metadata, source/asset/rights records, corrupt media rejection, project isolation, storage failure status and existing-public-bucket refusal. A compiled API HTTP smoke also passed with a real multipart upload. Client-abort cleanup and upload-slot release are covered by an actual HTTP connection test.
+
+M2 integration uses real PostgreSQL/Redis and explicit external-provider transport fixtures. It covers immutable/concurrent transcript versions, source/project scope, both adapter wire formats through jobs, stale edits, full-request idempotency, cached persistence recovery and uncertain-call non-repetition. These fixtures are test-only and do not prove live model/account compatibility. No live OpenAI/Claude call was performed in the initial M2 environment because keys/models were absent. To opt into one paid live verification request per provider after configuring both:
+
+```powershell
+$env:RUN_LLM_LIVE_TESTS = '1'
+npm run test:live
+```
+
+Without that flag both live cases explicitly skip. Do not enable it for routine offline test runs.
 
 Without both test URLs, integration tests are explicitly skipped. Unit/API tests use test doubles; they do not verify PostgreSQL or BullMQ behavior. The integration publication-outage case injects an enqueue error; it does not stop a Redis server. Interrupted-state coverage starts with a persisted running-job fixture; it does not prove OS process-kill recovery.
 
@@ -109,4 +155,4 @@ Press Ctrl+C in API/worker terminals. `docker compose down` stops dependencies a
 
 ## Scope and next milestone
 
-No frontend, AI providers, transcription, final rendering, URL downloads, or Remotion integration yet. M2 adds transcript segments, a Source Knowledge Pack, grounded versioned scripts and reference validation. Local design/reference documents live in `docs/`, which is intentionally excluded from Git by this project's configuration.
+No frontend, automatic speech transcription, scene analysis, voice generation, final rendering, URL downloads, or Remotion integration yet. M3 adds an ElevenLabs voice adapter, per-sentence audio regeneration and measured durations. Local design/reference documents live in `docs/`, which is intentionally excluded from Git by this project's configuration.
