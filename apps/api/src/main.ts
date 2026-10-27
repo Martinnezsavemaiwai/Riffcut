@@ -1,15 +1,22 @@
 import { createApp } from './app.js';
-import { readConfig } from '../../../packages/core/src/config.js';
+import { readConfig, readStorageConfig } from '../../../packages/core/src/config.js';
 import { createPool, PgStore } from '../../../packages/core/src/database.js';
 import { createQueue, createRedis, enqueueJob, workerHealthy } from '../../../packages/core/src/queue.js';
 import { reconcileJobs } from '../../../packages/core/src/jobs.js';
+import { S3Storage } from '../../../packages/core/src/storage.js';
+import { SourceService } from '../../../packages/core/src/source-service.js';
+import { PgSourceRepository } from '../../../packages/core/src/source-database.js';
+import { probeFile } from '../../../packages/core/src/media.js';
 
 const config = readConfig();
+const storageConfig = readStorageConfig();
+const storage = new S3Storage(storageConfig);
 const pool = createPool(config.databaseUrl);
 const redis = createRedis(config.redisUrl);
 const queue = createQueue(redis);
 const enqueue = (id: string) => enqueueJob(queue, id);
-const app = createApp({ store: new PgStore(pool), enqueue, redisReady: async () => (await redis.ping()) === 'PONG', workerHealthy: () => workerHealthy(redis) });
+const sources = new SourceService(new PgSourceRepository(pool), storage, path => probeFile(path, storageConfig.docker, storageConfig.image));
+const app = createApp({ store: new PgStore(pool), enqueue, redisReady: async () => (await redis.ping()) === 'PONG', workerHealthy: () => workerHealthy(redis), sources });
 let reconciling = false;
 async function reconcile() {
   if (reconciling) return;
@@ -32,6 +39,7 @@ async function shutdown() {
   await app.close();
   await queue.close();
   redis.disconnect();
+  storage.close();
   await pool.end();
 }
 process.once('SIGINT', () => { void shutdown(); });

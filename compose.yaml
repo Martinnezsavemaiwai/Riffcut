@@ -27,6 +27,26 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  minio:
+    image: riffcut-storage:dev
+    build:
+      context: ./infra/docker
+      dockerfile: storage.Dockerfile
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: riffcut_storage
+      MINIO_ROOT_PASSWORD: riffcut_dev_storage_only
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 volumes:
   postgres_data:
   redis_data:
+  minio_data:

@@ -1,16 +1,20 @@
 import Fastify from 'fastify';
 import { ZodError } from 'zod';
 import { idempotencyKey, jobInput, projectInput, uuid, type Store } from '../../../packages/core/src/contracts.js';
+import { SourceError } from '../../../packages/core/src/sources.js';
+import { registerSourceRoutes, type SourceApi } from './source-routes.js';
 
 export type AppDependencies = {
   store: Store;
   enqueue(id: string): Promise<void>;
   redisReady(): Promise<boolean>;
   workerHealthy(): Promise<boolean>;
+  sources?: SourceApi;
 };
 export function createApp(deps: AppDependencies) {
-  const app = Fastify({ bodyLimit: 65536, logger: false });
+  const app = Fastify({ bodyLimit: 65536, requestTimeout: 120000, logger: false });
   app.setErrorHandler<Error & { statusCode?: number; code?: string }>((error, _request, reply) => {
+    if (error instanceof SourceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
     if (error instanceof ZodError || error.statusCode === 400) return reply.code(400).send({ error: { code: 'INVALID_INPUT', message: 'Invalid request' } });
     if (error.statusCode === 413) return reply.code(413).send({ error: { code: 'BODY_TOO_LARGE', message: 'Request body is too large' } });
     if (error.statusCode === 415) return reply.code(415).send({ error: { code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Use application/json' } });
@@ -38,7 +42,7 @@ export function createApp(deps: AppDependencies) {
     return job ?? reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Resource not found' } });
   });
   app.get('/health', async (_request, reply) => {
-    const checks = await Promise.allSettled([deps.store.ready(), deps.redisReady()]);
+    const checks = await Promise.allSettled([deps.store.ready(), deps.redisReady(), ...(deps.sources ? [deps.sources.ready()] : [])]);
     const healthy = checks.every(check => check.status === 'fulfilled' && check.value);
     return reply.code(healthy ? 200 : 503).send({ status: healthy ? 'ready' : 'unavailable' });
   });
@@ -46,5 +50,6 @@ export function createApp(deps: AppDependencies) {
     const healthy = await deps.workerHealthy().catch(() => false);
     return reply.code(healthy ? 200 : 503).send({ status: healthy ? 'ready' : 'unavailable' });
   });
+  if (deps.sources) registerSourceRoutes(app, deps.sources);
   return app;
 }

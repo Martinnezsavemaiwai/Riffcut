@@ -14,13 +14,16 @@
     "dev:api": "node --env-file=.env --import tsx apps/api/src/main.ts",
     "dev:worker": "node --env-file=.env --import tsx workers/workflow-worker/src/main.ts",
     "db:migrate": "node --env-file=.env --import tsx infra/scripts/migrate.ts",
+    "storage:init": "node --env-file=.env --import tsx infra/scripts/storage-init.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json && node --input-type=module -e \"import { cpSync } from 'node:fs'; cpSync('infra/migrations', 'dist/infra/migrations', { recursive: true });\"",
     "lint": "eslint .",
     "test": "vitest run --exclude 'tests/integration/**'",
-    "test:integration": "vitest run tests/integration/m0.test.ts"
+    "test:integration": "vitest run tests/integration/m0.test.ts tests/integration/m1.test.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1156.0",
+    "@fastify/multipart": "^10.1.6",
     "bullmq": "^5.81.5",
     "fastify": "^5.12.7",
     "ioredis": "^5.11.1",
