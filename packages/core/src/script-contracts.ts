@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 export const transcriptInput = z.strictObject({ language: z.literal('th').default('th'), segments: z.array(z.strictObject({ startMs: z.number().int().nonnegative(), endMs: z.number().int().positive(), text: z.string().trim().min(1).max(2000) })).min(1).max(500) });
 export type TranscriptInput = z.infer<typeof transcriptInput>;
-export const providerName = z.enum(['openai', 'anthropic']);
+export const providerName = z.enum(['openai', 'anthropic', 'ollama']);
 export const generationInput = z.strictObject({ kind: z.literal('generate_script'), knowledgePackId: z.uuid(), provider: providerName, targetDurationSeconds: z.union([z.literal(30), z.literal(60), z.literal(90)]), style: z.enum(['summary', 'explainer', 'story']).default('summary') });
 export const storedGenerationInput = generationInput.extend({ model: z.string().min(1).max(200) });
 export type GenerationInput = z.infer<typeof generationInput>;

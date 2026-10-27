@@ -101,6 +101,27 @@ Generation uses the existing background queue. Model settings are snapshotted wh
 
 ## Validation
 
+### Local script generation with Ollama
+
+Install [Ollama for Windows](https://docs.ollama.com/windows), then run `ollama pull qwen3:4b`.
+Set the Windows user environment variable `OLLAMA_NO_CLOUD=1` and restart Ollama before use to disable server-side cloud routing. The adapter also rejects model names containing `cloud`; use a downloaded local model. See [Ollama local-only configuration](https://docs.ollama.com/faq#how-do-i-disable-ollamas-cloud-features).
+Set `OLLAMA_MODELS` in your Windows user environment before starting Ollama to store model files on a larger drive, for example `D:\RiffcutModels\Ollama`.
+Add `OLLAMA_MODEL=qwen3:4b` to your untracked `.env`, run `npm run db:migrate`, and restart API and worker.
+Submit the same `generate_script` request with `provider: "ollama"`. The model is snapshotted and scripts/evidence are validated and versioned through the existing workflow.
+
+The adapter calls only `http://127.0.0.1:11434/api/chat`, rejects redirects, and never falls back to paid providers. It uses JSON Schema, disables thinking, caps context at 16384 tokens and output at 4000 tokens, and allows 180 seconds for local generation. Local input is conservatively limited to 12000 UTF-8 bytes including instructions; split longer transcripts before submitting. Successful output must still pass reference/quote and estimated duration validation; this does not establish factual entailment or speech duration. Local token usage is recorded, monetary cost remains null (no provider charge is made, but electricity/hardware are not priced).
+
+To keep the small local model reliable, local output uses one to three segments (based on source segment count), with an equal share of the target duration assigned to each segment by the schema. These are pacing budgets, not measured speech lengths. Reference IDs and bounded verbatim excerpts are constrained to source values; the existing validator still rejects mismatched reference/quote pairs. Voice duration must be measured in the voice milestone.
+
+Opt-in local smoke (no paid API calls):
+
+```powershell
+$env:RUN_OLLAMA_LIVE_TESTS = '1'
+node --env-file=.env node_modules/vitest/vitest.mjs run tests/live/ollama.test.ts
+```
+
+This adds local script generation only. URL downloading, automatic transcription, voice generation and rendering remain separate milestones. Quality and speed need evaluation on representative Thai content; GPU memory is shared with other applications.
+
 ```powershell
 npm run lint
 npm run typecheck

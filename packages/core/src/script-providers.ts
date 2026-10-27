@@ -9,6 +9,7 @@ const content = z.object({ type: z.string(), text: z.string().optional() });
 const counters = z.object({ input_tokens: z.number().int().nonnegative(), output_tokens: z.number().int().nonnegative(), cache_read_input_tokens: z.number().int().nonnegative().optional(), cache_creation_input_tokens: z.number().int().nonnegative().optional(), input_tokens_details: z.object({ cached_tokens: z.number().int().nonnegative().optional() }).optional() });
 const openaiResponse = z.object({ id: z.string().min(1).max(200), status: z.literal('completed'), output: z.array(z.object({ type: z.string(), content: z.array(content).optional() })), usage: counters });
 const anthropicResponse = z.object({ id: z.string().min(1).max(200), stop_reason: z.literal('end_turn'), content: z.array(content), usage: counters });
+const ollamaResponse = z.object({ done: z.literal(true), done_reason: z.literal('stop'), message: z.object({ content: z.string() }), prompt_eval_count: z.number().int().nonnegative(), eval_count: z.number().int().nonnegative() });
 async function readJson(response: Response): Promise<unknown> {
   if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error('Provider unavailable'); }
   const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let length = 0;
@@ -25,14 +26,27 @@ async function readJson(response: Response): Promise<unknown> {
 export function createScriptProvider(provider: ProviderName, key: string, model: string, fetcher: typeof fetch = fetch): ScriptProvider {
   return { model, async generate({ pack, request }) {
     const input = JSON.stringify({ targetDurationSeconds: request.targetDurationSeconds, style: request.style, language: pack.language, transcriptSegments: pack.transcriptSegments });
-    const body = provider === 'openai'
+    const localRef = { type: 'string', enum: pack.transcriptSegments.map(segment => segment.id) };
+    const localSegments = Math.min(3, pack.transcriptSegments.length);
+    const localDuration = request.targetDurationSeconds * 1000 / localSegments;
+    const localSchema = object({ title: { type: 'string' }, segments: { type: 'array', minItems: localSegments, maxItems: localSegments, items: object({ text: { type: 'string' }, sourceRefs: { type: 'array', minItems: 1, items: localRef }, evidence: { type: 'array', minItems: 1, items: object({ segmentId: localRef, quote: { type: 'string', enum: pack.transcriptSegments.map(segment => segment.text.slice(0, 1000)) } }) }, estimatedDurationMs: { type: 'integer', enum: [localDuration] } }) } });
+    const localInstructions = `${instructions} The sum of estimatedDurationMs MUST equal ${request.targetDurationSeconds * 1000}. For a single segment use estimatedDurationMs=${request.targetDurationSeconds * 1000}. Write exactly ${localSegments} segments with estimatedDurationMs=${localDuration} each. Use the allowed verbatim excerpts as evidence quotes. Never add facts to fill time; timing is only an estimate.`;
+    const body = provider === 'ollama'
+      ? { model: request.model, messages: [{ role: 'system', content: localInstructions }, { role: 'user', content: input }], stream: false, think: false, format: localSchema, keep_alive: '2m', options: { num_ctx: 16384, num_predict: 4000, temperature: 0 } }
+      : provider === 'openai'
       ? { model: request.model, instructions, input, store: false, max_output_tokens: 4000, text: { format: { type: 'json_schema', name: 'riffcut_script', strict: true, schema } } }
       : { model: request.model, system: instructions, messages: [{ role: 'user', content: input }], max_tokens: 4000, output_config: { format: { type: 'json_schema', schema } } };
     try {
-      const response = await fetcher(provider === 'openai' ? 'https://api.openai.com/v1/responses' : 'https://api.anthropic.com/v1/messages', {
-        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(45000), headers: { 'content-type': 'application/json', ...(provider === 'openai' ? { authorization: `Bearer ${key}` } : { 'x-api-key': key, 'anthropic-version': '2023-06-01' }) }, body: JSON.stringify(body),
+      // Reject oversized local prompts before Ollama can silently truncate evidence.
+      if (provider === 'ollama' && Buffer.byteLength(localInstructions + input, 'utf8') > 12000) throw new Error('Local context limit');
+      const response = await fetcher(provider === 'ollama' ? 'http://127.0.0.1:11434/api/chat' : provider === 'openai' ? 'https://api.openai.com/v1/responses' : 'https://api.anthropic.com/v1/messages', {
+        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(provider === 'ollama' ? 180000 : 45000), headers: { 'content-type': 'application/json', ...(provider === 'ollama' ? {} : provider === 'openai' ? { authorization: `Bearer ${key}` } : { 'x-api-key': key, 'anthropic-version': '2023-06-01' }) }, body: JSON.stringify(body),
       });
       const raw = await readJson(response);
+      if (provider === 'ollama') {
+        const local = ollamaResponse.parse(raw);
+        return { output: draftSchema.parse(JSON.parse(local.message.content)), responseId: crypto.randomUUID(), usage: { inputTokens: local.prompt_eval_count, outputTokens: local.eval_count, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: null } };
+      }
       const parsed = provider === 'openai' ? openaiResponse.parse(raw) : anthropicResponse.parse(raw);
       const blocks = 'output' in parsed ? parsed.output.flatMap(item => item.content ?? []).filter(block => block.type === 'output_text') : parsed.content.filter(block => block.type === 'text');
       if (blocks.length !== 1 || !blocks[0]?.text) throw new Error('Expected one structured script');
@@ -42,5 +56,5 @@ export function createScriptProvider(provider: ProviderName, key: string, model:
 }
 export function configuredScriptProviders(env: NodeJS.ProcessEnv = process.env): Partial<Record<ProviderName, ScriptProvider>> {
   const config = readProviderConfig(env);
-  return Object.fromEntries(Object.entries(config).map(([name, value]) => [name, createScriptProvider(name === 'openai' ? 'openai' : 'anthropic', value.key, value.model)]));
+  return Object.fromEntries(Object.entries(config).map(([name, value]) => [name, createScriptProvider(name === 'ollama' ? 'ollama' : name === 'openai' ? 'openai' : 'anthropic', value.key, value.model)]));
 }

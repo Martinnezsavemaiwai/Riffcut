@@ -37,5 +37,7 @@ export function readProviderConfig(env: NodeJS.ProcessEnv = process.env) {
     if (!value.success) continue;
     config[name] = value.data;
   }
+  const localModel = z.string().trim().min(1).max(200).refine(value => !value.toLowerCase().includes('cloud')).safeParse(env.OLLAMA_MODEL);
+  if (localModel.success) config.ollama = { key: '', model: localModel.data };
   return config;
 }

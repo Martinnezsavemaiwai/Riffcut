@@ -29,7 +29,7 @@ describe.skipIf(!enabled)('M2 real PostgreSQL/Redis with explicit provider trans
   let sourceId: string;
   let pack: KnowledgePack;
   let invalidOutput = false;
-  const calls = { openai: 0, anthropic: 0 };
+  const calls = { openai: 0, anthropic: 0, ollama: 0 };
   const projects: string[] = [];
   const queueName = `riffcut-m2-test-${randomUUID()}`;
   const enqueue = (id: string) => enqueueJob(queue, id);
@@ -44,10 +44,10 @@ describe.skipIf(!enabled)('M2 real PostgreSQL/Redis with explicit provider trans
   function testProvider(provider: ProviderName) {
     return createScriptProvider(provider, 'test-only-not-a-live-key', 'test-model', async (_url, init) => {
       calls[provider]++;
-      const body = JSON.parse(String(init?.body)); const input = JSON.parse(provider === 'openai' ? body.input : body.messages[0].content);
+      const body = JSON.parse(String(init?.body)); const input = JSON.parse(provider === 'openai' ? body.input : body.messages[provider === 'ollama' ? 1 : 0].content);
       const ref = input.transcriptSegments[0].id;
       const output = { title: 'บททดสอบจาก response fixture', segments: [{ text: 'แมวชอบที่อบอุ่น', sourceRefs: [invalidOutput ? randomUUID() : ref], evidence: [{ segmentId: ref, quote: 'แมวชอบนอน' }], estimatedDurationMs: input.targetDurationSeconds * 1000 }] };
-      return new Response(JSON.stringify(provider === 'openai' ? { id: 'fixture-openai', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(output) }] }], usage: { input_tokens: 20, output_tokens: 30 } } : { id: 'fixture-claude', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(output) }], usage: { input_tokens: 20, output_tokens: 30 } }));
+      return new Response(JSON.stringify(provider === 'ollama' ? { done: true, done_reason: 'stop', message: { content: JSON.stringify(output) }, prompt_eval_count: 20, eval_count: 30 } : provider === 'openai' ? { id: 'fixture-openai', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(output) }] }], usage: { input_tokens: 20, output_tokens: 30 } } : { id: 'fixture-claude', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(output) }], usage: { input_tokens: 20, output_tokens: 30 } }));
     });
   }
   function startWorker(scriptService = service) {
@@ -63,7 +63,7 @@ describe.skipIf(!enabled)('M2 real PostgreSQL/Redis with explicit provider trans
     pool = createPool(process.env.TEST_DATABASE_URL!); await migrate(pool);
     connection = new Redis(process.env.TEST_REDIS_URL!, { lazyConnect: true, maxRetriesPerRequest: null, connectTimeout: 2000, retryStrategy: () => null }); connection.on('error', () => {}); await connection.connect();
     queue = createQueue(connection, queueName); store = new PgStore(pool); repository = new PgScriptRepository(pool);
-    service = new ScriptService(repository, { openai: testProvider('openai'), anthropic: testProvider('anthropic') });
+    service = new ScriptService(repository, { openai: testProvider('openai'), anthropic: testProvider('anthropic'), ollama: testProvider('ollama') });
     app = createApp({ store, enqueue, redisReady: async () => true, workerHealthy: async () => true, scripts: service });
     ({ projectId, sourceId } = await createSource());
     const response = await app.inject({ method: 'POST', url: `/api/projects/${projectId}/sources/${sourceId}/transcripts`, payload: transcript }); expect(response.statusCode).toBe(201); pack = response.json();
@@ -98,7 +98,7 @@ describe.skipIf(!enabled)('M2 real PostgreSQL/Redis with explicit provider trans
     expect((await app.inject({ method: 'POST', url: `/api/projects/${other.projectId}/sources/${other.sourceId}/transcripts`, payload: transcript })).statusCode).toBe(409);
     expect((await app.inject({ method: 'POST', url: `/api/projects/${other.projectId}/sources/${sourceId}/transcripts`, payload: transcript })).statusCode).toBe(404);
   });
-  it.each(['openai', 'anthropic'] as const)('executes %s generation through real queue/SQL with an explicit provider response fixture', async provider => {
+  it.each(['openai', 'anthropic', 'ollama'] as const)('executes %s generation through real queue/SQL with an explicit provider response fixture', async provider => {
     const key = randomUUID(); const response = await submit(provider, key); expect(response.statusCode, response.body).toBe(202);
     const duplicate = await submit(provider, key); expect(duplicate.statusCode).toBe(200); expect(duplicate.json().id).toBe(response.json().id);
     expect((await submit(provider, key, { targetDurationSeconds: 60 })).statusCode).toBe(409);
