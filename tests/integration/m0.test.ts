@@ -124,8 +124,9 @@ describe.skipIf(!databaseUrl || !redisUrl)('M0 real PostgreSQL/Redis integration
     expect((await store.getJob(job.id))?.attempts).toBe(2);
   });
   it('reports unavailable health once a real Redis heartbeat expires', async () => {
-    await connection.set(heartbeatKey, String(Date.now()), 'PX', 100);
+    await connection.set(heartbeatKey, String(Date.now()), 'EX', 15);
     expect((await app.inject('/health/worker')).statusCode).toBe(200);
+    await connection.pexpire(heartbeatKey, 100);
     await until(async () => (await app.inject('/health/worker')).statusCode === 503);
   });
 });
