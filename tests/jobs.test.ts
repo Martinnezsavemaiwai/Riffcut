@@ -1,9 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import { reconcileJobs, runCheck, type ExecutionStore } from '../packages/core/src/jobs.js';
+import { reconcileJobs, runJob, PermanentJobError, type ExecutionStore } from '../packages/core/src/jobs.js';
 import { enqueueJob, workerHealthy } from '../packages/core/src/queue.js';
 import type { Queue } from 'bullmq';
 
 describe('durable job execution', () => {
+  it('stops a permanent provider failure after one persisted attempt', async () => {
+    const store: ExecutionStore = { withJobLock: async (_id, fn) => fn(), getExecution: async () => ({ status: 'pending', attempts: 0 }), startAttempt: vi.fn(), complete: vi.fn(), failAttempt: vi.fn() };
+    const failure = { code: 'GENERATION_UNCERTAIN', message: 'Provider call needs review' };
+    await expect(runJob('id', store, async () => { throw new PermanentJobError(failure); })).rejects.toMatchObject({ message: failure.message });
+    expect(store.failAttempt).toHaveBeenCalledWith('id', true, failure);
+  });
   it('republishes persisted jobs after publication failure without blocking other jobs', async () => {
     const enqueue = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(undefined);
     expect(await reconcileJobs(async () => ['a', 'b'], enqueue)).toEqual({ published: 1, failed: 1 });
@@ -14,7 +20,7 @@ describe('durable job execution', () => {
     const check = vi.fn(async () => ({ infrastructure: 'ok' }));
     for (const status of ['completed', 'failed'] as const) {
       const store: ExecutionStore = { withJobLock: async (_id, fn) => fn(), getExecution: async () => ({ status, attempts: 3 }), startAttempt: vi.fn(), complete: vi.fn(), failAttempt: vi.fn() };
-      await runCheck('id', store, check);
+      await runJob('id', store, check);
       expect(store.startAttempt).not.toHaveBeenCalled();
     }
     expect(check).not.toHaveBeenCalled();
@@ -28,26 +34,26 @@ describe('durable job execution', () => {
       failAttempt: vi.fn(async (_id, final) => { status = final ? 'failed' : 'pending'; }),
     };
     const check = vi.fn(async () => { throw new Error('secret provider error'); });
-    for (let i = 0; i < 3; i++) await expect(runCheck('id', store, check)).rejects.toThrow('Infrastructure check failed');
+    for (let i = 0; i < 3; i++) await expect(runJob('id', store, check)).rejects.toThrow('Infrastructure check failed');
     expect(status).toBe('failed'); expect(attempts).toBe(3);
-    await runCheck('id', store, check);
+    await runJob('id', store, check);
     expect(check).toHaveBeenCalledTimes(3);
     expect(store.failAttempt).toHaveBeenLastCalledWith('id', true, { code: 'CHECK_FAILED', message: 'Infrastructure check failed' });
   });
   it('recovers a running job and retains the attempt budget across redelivery', async () => {
     const store: ExecutionStore = { withJobLock: async (_id, fn) => fn(), getExecution: async () => ({ status: 'running', attempts: 3 }), startAttempt: vi.fn(), complete: vi.fn(), failAttempt: vi.fn() };
     const check = vi.fn();
-    await runCheck('id', store, check);
+    await runJob('id', store, check);
     expect(check).not.toHaveBeenCalled(); expect(store.failAttempt).toHaveBeenCalledWith('id', true, expect.any(Object));
   });
   it('stores a successful check result', async () => {
     const store: ExecutionStore = { withJobLock: async (_id, fn) => fn(), getExecution: async () => ({ status: 'pending', attempts: 0 }), startAttempt: vi.fn(), complete: vi.fn(), failAttempt: vi.fn() };
-    await runCheck('id', store, async () => ({ infrastructure: 'ok' }));
+    await runJob('id', store, async () => ({ infrastructure: 'ok' }));
     expect(store.startAttempt).toHaveBeenCalledWith('id'); expect(store.complete).toHaveBeenCalledWith('id', { infrastructure: 'ok' });
   });
   it('rejects jobs missing from the durable store', async () => {
     const store: ExecutionStore = { withJobLock: async (_id, fn) => fn(), getExecution: async () => null, startAttempt: vi.fn(), complete: vi.fn(), failAttempt: vi.fn() };
-    await expect(runCheck('id', store, vi.fn())).rejects.toThrow('Job not found');
+    await expect(runJob('id', store, vi.fn())).rejects.toThrow('Job not found');
   });
 });
 describe('worker heartbeat', () => {

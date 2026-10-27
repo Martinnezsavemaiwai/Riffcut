@@ -19,7 +19,8 @@
     "build": "tsc -p tsconfig.build.json && node --input-type=module -e \"import { cpSync } from 'node:fs'; cpSync('infra/migrations', 'dist/infra/migrations', { recursive: true });\"",
     "lint": "eslint .",
     "test": "vitest run --exclude 'tests/integration/**'",
-    "test:integration": "vitest run tests/integration/m0.test.ts tests/integration/m1.test.ts"
+    "test:integration": "vitest run tests/integration/m0.test.ts tests/integration/m1.test.ts tests/integration/m2.test.ts",
+    "test:live": "node --env-file=.env node_modules/vitest/vitest.mjs run tests/live/script-providers.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1156.0",

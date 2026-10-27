@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readConfig, readStorageConfig } from '../packages/core/src/config.js';
+import { readConfig, readStorageConfig, readProviderConfig } from '../packages/core/src/config.js';
 
 const env = { DATABASE_URL: 'postgres://user:pass@localhost:5432/riffcut', REDIS_URL: 'redis://localhost:6379' };
 describe('environment configuration', () => {
@@ -14,6 +14,16 @@ describe('environment configuration', () => {
     try { readConfig({ ...env, DATABASE_URL: 'secret-password' }); } catch (error) {
       expect(String(error)).not.toContain('secret-password');
     }
+  });
+});
+describe('optional script provider configuration', () => {
+  it('keeps non-generation features available with absent or partial credentials', () => {
+    expect(readProviderConfig({})).toEqual({});
+    expect(readProviderConfig({ OPENAI_API_KEY: 'private-secret' })).toEqual({});
+    expect(readProviderConfig({ ANTHROPIC_MODEL: 'selected-model' })).toEqual({});
+  });
+  it('configures both providers independently without model defaults', () => {
+    expect(readProviderConfig({ OPENAI_API_KEY: 'key-one', OPENAI_MODEL: 'model-one', ANTHROPIC_API_KEY: 'key-two', ANTHROPIC_MODEL: 'model-two' })).toEqual({ openai: { key: 'key-one', model: 'model-one' }, anthropic: { key: 'key-two', model: 'model-two' } });
   });
 });
 describe('server-side storage configuration', () => {

@@ -9,6 +9,7 @@ function setup() {
   const store: Store = {
     createProject: vi.fn(async () => project),
     createJob: vi.fn(async () => ({ job, created: true })),
+    getJobByKey: vi.fn(async () => null),
     getJob: vi.fn(async () => job),
     ready: vi.fn(async () => true),
   };
