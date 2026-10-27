@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readConfig } from '../packages/core/src/config.js';
+import { readConfig, readStorageConfig } from '../packages/core/src/config.js';
 
 const env = { DATABASE_URL: 'postgres://user:pass@localhost:5432/riffcut', REDIS_URL: 'redis://localhost:6379' };
 describe('environment configuration', () => {
@@ -14,5 +14,18 @@ describe('environment configuration', () => {
     try { readConfig({ ...env, DATABASE_URL: 'secret-password' }); } catch (error) {
       expect(String(error)).not.toContain('secret-password');
     }
+  });
+});
+describe('server-side storage configuration', () => {
+  const storageEnv = { STORAGE_ENDPOINT: 'http://127.0.0.1:9000', STORAGE_BUCKET: 'riffcut-media', STORAGE_ACCESS_KEY: 'test-key', STORAGE_SECRET_KEY: 'test-secret' };
+  it('requires storage credentials and restricts endpoints, bucket names and image syntax', () => {
+    expect(readStorageConfig(storageEnv)).toMatchObject({ region: 'us-east-1', docker: 'docker', image: 'riffcut-media:dev' });
+    expect(() => readStorageConfig({ ...storageEnv, STORAGE_SECRET_KEY: '' })).toThrow('Invalid storage environment configuration');
+    expect(() => readStorageConfig({ ...storageEnv, STORAGE_ENDPOINT: 'file:///secret' })).toThrow();
+    expect(() => readStorageConfig({ ...storageEnv, STORAGE_BUCKET: '../outside' })).toThrow();
+    expect(() => readStorageConfig({ ...storageEnv, MEDIA_IMAGE: 'image --privileged' })).toThrow();
+  });
+  it('does not expose input secrets when configuration fails', () => {
+    expect(() => readStorageConfig({ ...storageEnv, STORAGE_ENDPOINT: 'private-secret-invalid-url' })).toThrow('Invalid storage environment configuration');
   });
 });
