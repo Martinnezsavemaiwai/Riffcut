@@ -1,8 +1,11 @@
 import Fastify from 'fastify';
 import { ZodError } from 'zod';
-import { idempotencyKey, jobInput, projectInput, uuid, type Store } from '../../../packages/core/src/contracts.js';
+import { isDeepStrictEqual } from 'node:util';
+import { idempotencyKey, jobInput, projectInput, uuid, DomainError, type Store, type StoredJobInput } from '../../../packages/core/src/contracts.js';
 import { SourceError } from '../../../packages/core/src/sources.js';
 import { registerSourceRoutes, type SourceApi } from './source-routes.js';
+import { ScriptError } from '../../../packages/core/src/script-contracts.js';
+import { registerScriptRoutes, type ScriptApi } from './script-routes.js';
 
 export type AppDependencies = {
   store: Store;
@@ -10,16 +13,17 @@ export type AppDependencies = {
   redisReady(): Promise<boolean>;
   workerHealthy(): Promise<boolean>;
   sources?: SourceApi;
+  scripts?: ScriptApi;
 };
 export function createApp(deps: AppDependencies) {
   const app = Fastify({ bodyLimit: 65536, requestTimeout: 120000, logger: false });
   app.setErrorHandler<Error & { statusCode?: number; code?: string }>((error, _request, reply) => {
-    if (error instanceof SourceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+    if (error instanceof SourceError || error instanceof ScriptError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
     if (error instanceof ZodError || error.statusCode === 400) return reply.code(400).send({ error: { code: 'INVALID_INPUT', message: 'Invalid request' } });
     if (error.statusCode === 413) return reply.code(413).send({ error: { code: 'BODY_TOO_LARGE', message: 'Request body is too large' } });
     if (error.statusCode === 415) return reply.code(415).send({ error: { code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Use application/json' } });
     if (error.code === 'NOT_FOUND') return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Resource not found' } });
-    if (error.code === 'CONFLICT') return reply.code(409).send({ error: { code: 'CONFLICT', message: 'Idempotency key conflicts with an existing request' } });
+    if (error.code === 'CONFLICT') return reply.code(409).send({ error: { code: 'CONFLICT', message: 'Request conflicts with the current resource state' } });
     return reply.code(503).send({ error: { code: 'SERVICE_UNAVAILABLE', message: 'Service temporarily unavailable' } });
   });
   app.post('/api/projects', async (request, reply) => {
@@ -30,7 +34,20 @@ export function createApp(deps: AppDependencies) {
     const projectId = uuid.parse(request.params.id);
     const input = jobInput.parse(request.body);
     const key = idempotencyKey.parse(request.headers['idempotency-key']);
-    const { job, created } = await deps.store.createJob(projectId, input, key);
+    const existing = await deps.store.getJobByKey(projectId, key);
+    let submission: Awaited<ReturnType<Store['createJob']>>;
+    if (existing) {
+      if (!isDeepStrictEqual(existing.input, input)) throw new DomainError('CONFLICT');
+      submission = { job: existing.job, created: false };
+    } else {
+      let stored: StoredJobInput;
+      if (input.kind === 'generate_script') {
+        if (!deps.scripts) throw new ScriptError('PROVIDER_UNAVAILABLE', 503, 'Script generation is not configured');
+        stored = await deps.scripts.prepareGeneration(projectId, input);
+      } else { stored = input; }
+      submission = await deps.store.createJob(projectId, stored, key);
+    }
+    const { job, created } = submission;
     if (job.status === 'pending') {
       // PostgreSQL retains accepted jobs for reconciliation when Redis is unavailable.
       await deps.enqueue(job.id).catch(() => {});
@@ -51,5 +68,6 @@ export function createApp(deps: AppDependencies) {
     return reply.code(healthy ? 200 : 503).send({ status: healthy ? 'ready' : 'unavailable' });
   });
   if (deps.sources) registerSourceRoutes(app, deps.sources);
+  if (deps.scripts) registerScriptRoutes(app, deps.scripts);
   return app;
 }

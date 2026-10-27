@@ -7,6 +7,9 @@ import { S3Storage } from '../../../packages/core/src/storage.js';
 import { SourceService } from '../../../packages/core/src/source-service.js';
 import { PgSourceRepository } from '../../../packages/core/src/source-database.js';
 import { probeFile } from '../../../packages/core/src/media.js';
+import { ScriptService } from '../../../packages/core/src/script-service.js';
+import { PgScriptRepository } from '../../../packages/core/src/script-database.js';
+import { configuredScriptProviders } from '../../../packages/core/src/script-providers.js';
 
 const config = readConfig();
 const storageConfig = readStorageConfig();
@@ -16,7 +19,8 @@ const redis = createRedis(config.redisUrl);
 const queue = createQueue(redis);
 const enqueue = (id: string) => enqueueJob(queue, id);
 const sources = new SourceService(new PgSourceRepository(pool), storage, path => probeFile(path, storageConfig.docker, storageConfig.image));
-const app = createApp({ store: new PgStore(pool), enqueue, redisReady: async () => (await redis.ping()) === 'PONG', workerHealthy: () => workerHealthy(redis), sources });
+const scripts = new ScriptService(new PgScriptRepository(pool), configuredScriptProviders());
+const app = createApp({ store: new PgStore(pool), enqueue, redisReady: async () => (await redis.ping()) === 'PONG', workerHealthy: () => workerHealthy(redis), sources, scripts });
 let reconciling = false;
 async function reconcile() {
   if (reconciling) return;

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ProviderName } from './script-contracts.js';
 
 const serviceUrl = (protocols: string[]) => z.url().pipe(z.string().refine(value => protocols.includes(new URL(value).protocol)));
 const schema = z.object({
@@ -26,4 +27,15 @@ export function readStorageConfig(env: NodeJS.ProcessEnv = process.env) {
   if (!parsed.success) throw new Error('Invalid storage environment configuration');
   const v = parsed.data;
   return { endpoint: v.STORAGE_ENDPOINT, region: v.STORAGE_REGION, bucket: v.STORAGE_BUCKET, accessKeyId: v.STORAGE_ACCESS_KEY, secretAccessKey: v.STORAGE_SECRET_KEY, docker: v.DOCKER_BIN, image: v.MEDIA_IMAGE };
+}
+export function readProviderConfig(env: NodeJS.ProcessEnv = process.env) {
+  const config: Partial<Record<ProviderName, { key: string; model: string }>> = {};
+  for (const [name, keyName, modelName] of [['openai', 'OPENAI_API_KEY', 'OPENAI_MODEL'], ['anthropic', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL']] as const) {
+    const key = env[keyName]; const model = env[modelName];
+    if (!key && !model) continue;
+    const value = z.object({ key: z.string().trim().min(1), model: z.string().trim().min(1).max(200) }).safeParse({ key, model });
+    if (!value.success) continue;
+    config[name] = value.data;
+  }
+  return config;
 }

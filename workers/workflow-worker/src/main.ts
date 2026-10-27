@@ -1,25 +1,31 @@
-import { Worker } from 'bullmq';
+import { Worker, UnrecoverableError } from 'bullmq';
 import { z } from 'zod';
 import { readConfig } from '../../../packages/core/src/config.js';
 import { createPool } from '../../../packages/core/src/database.js';
 import { createRedis, HEARTBEAT_KEY, HEARTBEAT_TTL_SECONDS, QUEUE_NAME } from '../../../packages/core/src/queue.js';
 import { createProcessor } from './processor.js';
+import { ScriptService } from '../../../packages/core/src/script-service.js';
+import { PgScriptRepository } from '../../../packages/core/src/script-database.js';
+import { configuredScriptProviders } from '../../../packages/core/src/script-providers.js';
+import { PermanentJobError } from '../../../packages/core/src/jobs.js';
 
 const config = readConfig();
 const pool = createPool(config.databaseUrl);
 const connection = createRedis(config.redisUrl, true);
 const healthRedis = createRedis(config.redisUrl);
+const scripts = new ScriptService(new PgScriptRepository(pool), configuredScriptProviders());
 const processJob = createProcessor(pool, async () => {
   await pool.query('SELECT 1');
   if (await healthRedis.ping() !== 'PONG') throw new Error('Redis check failed');
   return { infrastructure: 'ok', checkedAt: new Date().toISOString() };
-});
+}, (projectId, jobId, input) => scripts.generate(projectId, jobId, input));
 const payload = z.strictObject({ jobId: z.uuid() });
 const worker = new Worker(QUEUE_NAME, async job => {
-  if (job.name !== 'system_check') throw new Error('Unsupported job kind');
+  if (!['system_check', 'workflow'].includes(job.name)) throw new UnrecoverableError('Unsupported job kind');
   const data = payload.parse(job.data);
   if (job.id !== data.jobId) throw new Error('Job identifier mismatch');
-  await processJob(data.jobId);
+  try { await processJob(data.jobId); }
+  catch (error) { if (error instanceof PermanentJobError) throw new UnrecoverableError(error.message); throw error; }
 }, { connection, concurrency: 1, maxStalledCount: 2 });
 worker.on('error', () => console.error('Worker connection unavailable'));
 worker.on('failed', job => console.error('Job attempt failed', { jobId: job?.id }));

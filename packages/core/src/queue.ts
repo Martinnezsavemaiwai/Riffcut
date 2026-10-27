@@ -36,7 +36,7 @@ export async function enqueueJob(queue: Pick<Queue, 'waitUntilReady' | 'getJob' 
     if (state !== 'completed' && state !== 'failed') return;
     await existing.remove();
   }
-  await queue.add('system_check', { jobId: id }, { jobId: id });
+  await queue.add('workflow', { jobId: id }, { jobId: id });
 }
 export async function workerHealthy(redis: { get(key: string): Promise<string | null> }, key = HEARTBEAT_KEY) {
   const value = await redis.get(key);
