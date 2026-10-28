@@ -1,7 +1,10 @@
 import copy
 import unittest
+import tempfile
+import wave
+from pathlib import Path
 
-from render_preview import validate_manifest, make_timeline, ass_text, validate_phrases, phrase_timeline, styled_ass, sound_bed
+from render_preview import validate_manifest, make_timeline, ass_text, validate_phrases, phrase_timeline, styled_ass, sound_bed, save_voice_checkpoint, load_voice_checkpoint
 
 
 class PreviewTests(unittest.TestCase):
@@ -35,6 +38,31 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(timeline[0]["endMs"], 2250)
         with self.assertRaises(ValueError):
             make_timeline(self.manifest, [(160000, 16000)])
+
+    def test_voice_checkpoint_is_bound_to_edit_and_has_no_arbitrary_paths(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            voice = root / 'voice-0.wav'
+            with wave.open(str(voice), 'wb') as audio:
+                audio.setnchannels(1)
+                audio.setsampwidth(2)
+                audio.setframerate(16000)
+                audio.writeframes(b'\x01\x00' * 16000)
+            data = {"model": "local", "license": "test", "measurements": [[16000, 16000]], "phrases": [[]]}
+            checkpoint = save_voice_checkpoint(root, self.manifest, 'pack-1', data)
+            restore = root / 'restored'
+            restore.mkdir()
+            self.assertEqual(load_voice_checkpoint(checkpoint, restore, self.manifest, 'pack-1')["measurements"], [[16000, 16000]])
+            self.assertEqual((restore / 'voice-0.wav').read_bytes(), voice.read_bytes())
+            changed = copy.deepcopy(self.manifest)
+            changed['title'] = 'different edit'
+            with self.assertRaises(ValueError):
+                load_voice_checkpoint(checkpoint, restore, changed, 'pack-1')
+            import zipfile
+            with zipfile.ZipFile(root / 'bad.zip', 'w') as archive:
+                archive.writestr('../escape.wav', b'bad')
+            with self.assertRaises(ValueError):
+                load_voice_checkpoint(root / 'bad.zip', restore, self.manifest, 'pack-1')
 
     def test_styled_mode_requires_phrase_synthesis(self):
         with self.assertRaises(ValueError):

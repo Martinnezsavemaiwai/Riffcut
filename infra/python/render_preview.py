@@ -1,5 +1,6 @@
 """Render a reviewed local edit; this CLI does not generate or approve its script."""
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -7,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import wave
+import zipfile
 
 
 def validate_phrases(segment):
@@ -57,7 +59,7 @@ def validate_manifest(manifest, pack, styled=False):
         captions = segment.get("captions", [])
         if not isinstance(text, str) or not 1 <= len(text) <= 300:
             raise ValueError("Narration must contain 1-300 characters")
-        if not 1 <= len(captions) <= 4 or any(not isinstance(c, str) or not 1 <= len(c) <= 44 for c in captions):
+        if not 1 <= len(captions) <= (12 if "phrases" in segment else 4) or any(not isinstance(c, str) or not 1 <= len(c) <= 44 for c in captions):
             raise ValueError("Provide 1-4 short caption lines")
         if "".join("".join(captions).split()) != "".join(text.split()):
             raise ValueError("Captions must match spoken text")
@@ -122,7 +124,7 @@ def ass_text(manifest, timeline, credit="Voice: Meta MMS Thai / CC-BY-NC 4.0"):
     end = ass_time(timeline[-1]["endMs"])
     events = [f"Dialogue: 0,0:00:00.00,{end},Title,,0,0,0,,{safe_ass(manifest['title'])}",
               f"Dialogue: 0,0:00:00.00,{end},Label,,0,0,0,,RIFFCUT / EDITORIAL PREVIEW",
-              f"Dialogue: 0,0:00:00.00,{end},Credit,,0,0,0,,Source: Ani-Mi Thailand / Episode 1\\N{safe_ass(credit)}"]
+              f"Dialogue: 0,0:00:00.00,{end},Credit,,0,0,0,,{safe_ass(manifest.get('sourceCredit', 'Ani-Mi Thailand / Episode 1'))}\\N{safe_ass(credit)}"]
     for segment, timing in zip(manifest["segments"], timeline):
         lines = segment["captions"]
         # Two short lines per card; time cards from the measured utterance duration.
@@ -147,7 +149,7 @@ def styled_ass(manifest, timeline, phrases, credit):
     end = ass_time(timeline[-1]["endMs"])
     events = [f"Dialogue: 0,0:00:00.00,{end},Label,,0,0,0,,{{\\an8\\pos(360,108)}}RIFFCUT / ANIME RECAP",
               f"Dialogue: 0,0:00:00.00,{end},Title,,0,0,0,,{{\\an8\\pos(360,168)\\b1}}{safe_ass(manifest['title'])}",
-              f"Dialogue: 0,0:00:00.00,{end},Credit,,0,0,0,,{{\\an2\\pos(360,1170)}}Ani-Mi Thailand / Episode 1\\N{safe_ass(credit)}"]
+              f"Dialogue: 0,0:00:00.00,{end},Credit,,0,0,0,,{{\\an2\\pos(360,1170)}}{safe_ass(manifest.get('sourceCredit', 'Ani-Mi Thailand / Episode 1'))}\\N{safe_ass(credit)}"]
     for segment, timing, cards in zip(manifest["segments"], timeline, phrases):
         for card in cards:
             text = safe_ass(card["text"])
@@ -191,59 +193,107 @@ def run(command, directory):
                    stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
+def edit_fingerprint(manifest, pack_id):
+    return hashlib.sha256(json.dumps([manifest, pack_id], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def save_voice_checkpoint(directory, manifest, pack_id, data):
+    payload = {**data, "editHash": edit_fingerprint(manifest, pack_id)}
+    path = directory / "voices.zip"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("voices.json", json.dumps(payload, ensure_ascii=False))
+        for index in range(len(manifest["segments"])):
+            archive.write(directory / f"voice-{index}.wav", f"voice-{index}.wav")
+    return path
+
+
+def load_voice_checkpoint(path, directory, manifest, pack_id):
+    allowed = {"voices.json", *(f"voice-{i}.wav" for i in range(len(manifest["segments"])))}
+    with zipfile.ZipFile(path) as archive:
+        members = archive.infolist()
+        if (len(members) != len(allowed) or {m.filename for m in members} != allowed or
+                sum(m.file_size for m in members) > 32 * 1024 * 1024 or archive.getinfo("voices.json").file_size > 1024 * 1024):
+            raise ValueError("Invalid voice checkpoint archive")
+        data = json.loads(archive.read("voices.json"))
+        if data.get("editHash") != edit_fingerprint(manifest, pack_id):
+            raise ValueError("Voice checkpoint belongs to another edit")
+        if len(data["measurements"]) != len(manifest["segments"]) or len(data["phrases"]) != len(manifest["segments"]):
+            raise ValueError("Incomplete voice checkpoint")
+        for index, measurement in enumerate(data["measurements"]):
+            target = directory / f"voice-{index}.wav"
+            target.write_bytes(archive.read(target.name))
+            with wave.open(str(target), "rb") as audio:
+                if [audio.getnframes(), audio.getframerate()] != measurement or audio.getnchannels() != 1 or audio.getsampwidth() != 2:
+                    raise ValueError("Voice checkpoint measurement mismatch")
+    return data
+
+
 def render(args):
     manifest = json.loads(args.manifest.read_text(encoding="utf-8-sig"))
     pack = json.loads(args.pack.read_text(encoding="utf-8-sig"))
     validate_manifest(manifest, pack, styled=bool(args.fonts))
-    source = args.source.resolve(strict=True)
+    source = args.source.resolve(strict=args.stage != 'voice')
     model_dir = args.model.resolve(strict=True)
     # A unique output directory preserves prior previews and failed-run diagnostics.
     directory = args.output.resolve()
     directory.mkdir(parents=True, exist_ok=False)
     os.environ["HF_HUB_OFFLINE"] = "1"
     import numpy as np
-    if args.voice_engine == "fastthai":
-        from pythaitts.pretrained.fastthaig2p.tts import TTS
-        model = TTS(model_dir / "kokoro_thai.onnx", model_dir / "thai_som.npy",
-                    config_path=model_dir / "config.json", intra_op_threads=4)
-        rate = 24000
-        synthesize = model.generate
-        voice_name, voice_license = "FastThaiG2P v0.3.0 / thai_som", "Apache-2.0 (upstream repository)"
+    if args.stage == 'render':
+        if not args.checkpoint:
+            raise ValueError('Render stage requires a completed voice checkpoint')
+        data = load_voice_checkpoint(args.checkpoint, directory, manifest, pack.get('id'))
+        measurements, all_phrases = data['measurements'], data['phrases']
+        voice_name, voice_license = data['model'], data['license']
     else:
-        import torch
-        from transformers import AutoTokenizer, VitsModel, set_seed
-        torch.set_num_threads(4)
-        set_seed(42)
-        tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
-        model = VitsModel.from_pretrained(model_dir, local_files_only=True).eval()
-        rate = model.config.sampling_rate
+        if args.voice_engine == "fastthai":
+            from pythaitts.pretrained.fastthaig2p.tts import TTS
+            model = TTS(model_dir / "kokoro_thai.onnx", model_dir / "thai_som.npy",
+                        config_path=model_dir / "config.json", intra_op_threads=4)
+            rate = 24000
+            synthesize = model.generate
+            voice_name, voice_license = "FastThaiG2P v0.3.0 / thai_som", "Apache-2.0 (upstream repository)"
+        else:
+            import torch
+            from transformers import AutoTokenizer, VitsModel, set_seed
+            torch.set_num_threads(4)
+            set_seed(42)
+            tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+            model = VitsModel.from_pretrained(model_dir, local_files_only=True).eval()
+            rate = model.config.sampling_rate
 
-        def synthesize(text):
-            with torch.inference_mode():
-                return model(**tokenizer(text, return_tensors="pt")).waveform[0].cpu().numpy()
-        voice_name, voice_license = "facebook/mms-tts-tha", "CC-BY-NC-4.0"
-    measurements, all_phrases = [], []
-    for index, segment in enumerate(manifest["segments"]):
-        phrases = segment.get("phrases", [{"text": segment["text"], "pauseMs": 0}])
-        chunks, phrase_measurements = [], []
-        for phrase in phrases:
-            samples = synthesize(phrase["text"])
-            if not len(samples) or not np.isfinite(samples).all() or np.max(np.abs(samples)) < 0.001:
-                raise ValueError("Voice model produced empty or invalid audio")
-            phrase_measurements.append((len(samples), rate))
-            chunks.extend([samples, np.zeros(round(rate * phrase.get("pauseMs", 200) / 1000))])
-        all_phrases.append(phrase_timeline(phrases, phrase_measurements))
-        pcm = (np.clip(np.concatenate(chunks), -1, 1) * 32767).astype("<i2")
-        with wave.open(str(directory / f"voice-{index}.wav"), "wb") as audio:
-            audio.setnchannels(1)
-            audio.setsampwidth(2)
-            audio.setframerate(rate)
-            audio.writeframes(pcm.tobytes())
-        measurements.append((len(pcm), rate))
-        print(f"Voice {index + 1}: {len(pcm) / rate:.2f}s", flush=True)
+            def synthesize(text):
+                with torch.inference_mode():
+                    return model(**tokenizer(text, return_tensors="pt")).waveform[0].cpu().numpy()
+            voice_name, voice_license = "facebook/mms-tts-tha", "CC-BY-NC-4.0"
+        measurements, all_phrases = [], []
+        for index, segment in enumerate(manifest["segments"]):
+            phrases = segment.get("phrases", [{"text": segment["text"], "pauseMs": 0}])
+            chunks, phrase_measurements = [], []
+            for phrase in phrases:
+                samples = synthesize(phrase["text"])
+                if not len(samples) or not np.isfinite(samples).all() or np.max(np.abs(samples)) < 0.001:
+                    raise ValueError("Voice model produced empty or invalid audio")
+                phrase_measurements.append((len(samples), rate))
+                chunks.extend([samples, np.zeros(round(rate * phrase.get("pauseMs", 200) / 1000))])
+            all_phrases.append(phrase_timeline(phrases, phrase_measurements))
+            pcm = (np.clip(np.concatenate(chunks), -1, 1) * 32767).astype("<i2")
+            with wave.open(str(directory / f"voice-{index}.wav"), "wb") as audio:
+                audio.setnchannels(1)
+                audio.setsampwidth(2)
+                audio.setframerate(rate)
+                audio.writeframes(pcm.tobytes())
+            measurements.append((len(pcm), rate))
+            print(f"Voice {index + 1}: {len(pcm) / rate:.2f}s", flush=True)
     timeline = make_timeline(manifest, measurements)
     if not 30000 <= timeline[-1]["endMs"] <= 60000:
         raise ValueError("Preview must measure 30-60 seconds; revise the reviewed narration")
+    if args.stage == 'voice':
+        path = save_voice_checkpoint(directory, manifest, pack.get('id'), {
+            'measurements': measurements, 'phrases': all_phrases,
+            'model': voice_name, 'license': voice_license})
+        print(path)
+        return
     if args.fonts:
         shutil.copytree(args.fonts.resolve(strict=True), directory / "fonts")
     captions = styled_ass(manifest, timeline, all_phrases, voice_name) if args.fonts else ass_text(manifest, timeline, voice_name)
@@ -289,6 +339,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ["manifest", "pack", "source", "model", "output"]:
         parser.add_argument(f"--{name}", type=Path, required=True)
+    parser.add_argument("--stage", choices=["all", "voice", "render"], default="all")
+    parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--voice-engine", choices=["mms", "fastthai"], default="mms")
     parser.add_argument("--fonts", type=Path, help="Local directory containing Kanit Bold and its OFL license")
