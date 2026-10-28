@@ -15,7 +15,7 @@ export class ScriptService {
     if (!provider) throw new ScriptError('PROVIDER_UNAVAILABLE', 503, 'Selected script provider is not configured');
     return { ...input, model: provider.model };
   }
-  async generate(projectId: string, jobId: string, input: StoredGenerationInput) {
+  async generate(projectId: string, jobId: string, input: StoredGenerationInput, signal?: AbortSignal) {
     const existing = await this.repository.findGenerated(jobId);
     let run = await this.repository.getRun(jobId);
     if (existing) return { scriptId: existing.id, version: existing.version, usage: run?.result?.usage ?? null };
@@ -27,7 +27,7 @@ export class ScriptService {
       if (!await this.repository.startRun(jobId, input)) throw new ScriptError('GENERATION_UNCERTAIN', 422, 'Provider call already recorded');
       let result: GenerationResult;
       try {
-        const response = await provider.generate({ pack, request: input });
+        const response = await provider.generate({ pack, request: input, signal });
         result = { output: validateDraft(response.output, pack, input.targetDurationSeconds), usage: usageSchema.parse(response.usage), responseId: response.responseId };
       } catch {
         await this.repository.finishRun(jobId, null);

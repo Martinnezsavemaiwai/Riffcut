@@ -10,7 +10,7 @@ export type StoredGenerationInput = z.infer<typeof storedGenerationInput>;
 export type ProviderName = z.infer<typeof providerName>;
 export const draftSchema = z.strictObject({ title: z.string().trim().min(1).max(200), segments: z.array(z.strictObject({ text: z.string().trim().min(1).max(1000), sourceRefs: z.array(z.uuid()).min(1).max(20), evidence: z.array(z.strictObject({ segmentId: z.uuid(), quote: z.string().trim().min(2).max(1000) })).min(1).max(20), estimatedDurationMs: z.number().int().min(500).max(90000) })).min(1).max(30) });
 export type ScriptDraft = z.infer<typeof draftSchema>;
-export type KnowledgePack = { id: string; projectId: string; sourceId: string; assetId: string; version: number; schemaVersion: 1; language: 'th'; durationMs: number; provenance: 'user_supplied_transcript'; scenes: []; transcriptSegments: (TranscriptInput['segments'][number] & { id: string })[]; createdAt: string };
+export type KnowledgePack = { id: string; projectId: string; sourceId: string; assetId: string; version: number; schemaVersion: 1; language: 'th'; durationMs: number; provenance: 'user_supplied_transcript' | 'local_whisper'; transcription?: { engine: 'faster-whisper'; model: string }; scenes: []; transcriptSegments: (TranscriptInput['segments'][number] & { id: string })[]; createdAt: string };
 export type ScriptVersion = ScriptDraft & { id: string; projectId: string; knowledgePackId: string; version: number; parentId: string | null; targetDurationSeconds: 30 | 60 | 90; origin: 'generated' | 'manual'; provider: ProviderName | null; model: string | null; createdAt: string };
 export const usageSchema = z.strictObject({ inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), cacheReadTokens: z.number().int().nonnegative().default(0), cacheWriteTokens: z.number().int().nonnegative().default(0), costUsd: z.null() });
 export type TokenUsage = z.infer<typeof usageSchema>;
@@ -18,10 +18,10 @@ export type GenerationResult = { output: ScriptDraft; usage: TokenUsage; respons
 export type ProviderRun = { status: 'calling' | 'succeeded' | 'failed'; result: GenerationResult | null };
 export interface ScriptProvider {
   model: string;
-  generate(input: { pack: KnowledgePack; request: StoredGenerationInput }): Promise<GenerationResult>;
+  generate(input: { pack: KnowledgePack; request: StoredGenerationInput; signal?: AbortSignal }): Promise<GenerationResult>;
 }
 export interface ScriptRepository {
-  createPack(projectId: string, sourceId: string, input: TranscriptInput): Promise<KnowledgePack>;
+  createPack(projectId: string, sourceId: string, input: TranscriptInput, options?: { id: string; provenance: 'local_whisper'; model?: string }): Promise<KnowledgePack>;
   listPacks(projectId: string, sourceId: string): Promise<KnowledgePack[]>;
   getPack(projectId: string, packId: string): Promise<KnowledgePack | null>;
   listScripts(projectId: string): Promise<ScriptVersion[]>;
