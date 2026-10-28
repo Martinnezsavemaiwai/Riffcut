@@ -173,7 +173,7 @@ To include real M1 media/storage checks, use the same dedicated test database, t
 
 ```powershell
 $env:RUN_MEDIA_INTEGRATION = '1'
-node --env-file=.env node_modules/vitest/vitest.mjs run tests/integration/m0.test.ts tests/integration/m1.test.ts tests/integration/m2.test.ts
+node --env-file=.env node_modules/vitest/vitest.mjs run tests/integration/m0.test.ts tests/integration/m1.test.ts tests/integration/m2.test.ts tests/integration/render.test.ts
 ```
 
 M1 tests generate their own authorized media and random private test buckets. Cleanup deletes only test-owned records/objects/buckets. Without `RUN_MEDIA_INTEGRATION=1`, M1 explicitly skips and does not create service connections. Existing M0 test service variables remain required for M0.
@@ -221,4 +221,45 @@ For the revised style, add `--voice-engine fastthai --fonts D:/fonts/Kanit --sou
 
 The output directory must be new. It retains per-line WAVs, measured timing, edit manifest in `report.json`, subtitle ASS, intermediate parts and `preview.mp4`. Voice samples determine duration, including a 250ms pause per line; insufficient footage and previews outside 30–60 seconds are rejected. Source dialogue is replaced by narration. Footage keeps its full frame with padding. Legacy captions split an utterance proportionally; the revised style uses measured phrases with controlled pauses, not word-level forced alignment. The original generated sound bed adds soft pulses and transition swells; FFmpeg sidechain compression lowers it during narration. Per-part frame/AAC rounding can still cause small offsets, so inspect final MP4 duration. No API job, voice version persistence or production rendering is added by this preview.
 
-No frontend, scene analysis, production voice/render jobs or Remotion integration yet. Authorized public URL jobs add automatic Thai transcription and local script generation; the separate editorial preview CLI can produce a first local MP4. M3 adds persisted voice versions, per-sentence audio regeneration and measured durations. Local design/reference documents live in `docs/`, which is intentionally excluded from Git by this project's configuration.
+### Queued reviewed renders
+
+The queue now supports `render_video` jobs. Apply migrations, install the preview Python requirements, download the FastThaiG2P model and Kanit fonts, then set `RENDER_PYTHON`, `RENDER_MODEL_DIR`, `RENDER_FONTS_DIR`, `RENDER_PROFILE` and optionally `RENDER_WORK_DIR`, `FFMPEG_BIN`, `FFPROBE_BIN`. Restart API/worker. Python and FFmpeg run locally; no paid voice API is used. Use one worker for this local setup.
+
+`RENDER_PROFILE` is an explicit configuration version shared by API and worker. Change it whenever model files, fonts, voice packages or renderer settings change. It is a declared profile, not an automatic file-content fingerprint. A queued job with a different profile fails safely instead of silently changing its voice.
+
+First read/edit a script through the existing script endpoints. Submit the **immutable reviewed script ID**, one edit per script segment, and actual source ranges in milliseconds:
+
+```json
+{
+  "kind": "render_video",
+  "scriptId": "<reviewed-script-uuid>",
+  "reviewed": true,
+  "captionTitle": "Short Thai title",
+  "soundtrack": true,
+  "edits": [
+    {
+      "sourceStartMs": 10000,
+      "sourceEndMs": 25000,
+      "phrases": [
+        { "text": "<exact first phrase>", "pauseMs": 160 },
+        { "text": "<rest of this script segment>", "pauseMs": 400 }
+      ],
+      "keywords": []
+    }
+  ]
+}
+```
+
+Send this to `POST /api/projects/:id/jobs` with a fresh `Idempotency-Key`. This is a payload outline: replace placeholders and supply every script segment. Each phrase has at most28characters, pauses0–800ms, segment narration at most300characters, and at most12segments. Joined phrase text must equal the script narration ignoring whitespace. All footage must stay within the source and overlap cited transcript evidence. The optional caption title is capped at28characters; without it, the script title must fit. These checks establish consistency, not semantic accuracy or scene relevance; an editor still chooses ranges and verifies wording.
+
+The first preset produces measured30–60second,720×1280,H264/AAC MP4s. Pacing estimates in scripts do not force a duration; shorten/extend narration if synthesized speech is outside this range. Longer/90second renders are outside this preset.
+
+`GET /api/jobs/:id` reports `synthesizing_voice`, `restoring_voice`, `rendering_video` or `saving_video` in `result.stage` while running. Completed results contain `renderId`, `scriptId`, `sourceId`, `durationMs`, dimensions, bytes and `downloadPath`. Download from `GET /api/projects/:id/renders/:renderId/video`; objects remain private, the route checks project ownership and sends an MP4 attachment with `Cache-Control: no-store`. Existing completed downloads remain available when voice generation configuration is removed. The API remains local-only and unauthenticated; project scoping is not user authentication.
+
+A completed voice bundle is saved in private storage and tracked in PostgreSQL before video rendering starts. A retry restores that bundle instead of re-synthesizing, and a persisted completed video is returned without recomputation if job completion was interrupted. An interrupted incomplete voice phase restarts synthesis. Existing three-attempt job limits still apply. Retries use the same script/edit/profile snapshot; edits need a new script version/job. Voice bundles are per render job, not per-sentence reusable versions yet.
+
+Voice checkpoints are bounded ZIP archives of fixed WAV filenames plus metadata tied to the edit/Knowledge Pack. Work folders are unique and removed on normal completion/failure; lock-connection loss cancels the Python/FFmpeg process tree. Unique object keys prevent an interrupted older attempt overwriting a newer artifact. A crash between storage upload and database checkpoint can leave an unreferenced private object; automatic orphan collection is not implemented.
+
+`tests/integration/render.test.ts` uses real PostgreSQL, Redis and private S3 storage with explicit synthetic voice/video operation fixtures. It tests a render retry without voice regeneration, idempotency/conflicts, cached output and project-scoped downloads. Separately, the compiled API/worker has produced and served a real authorized36.5second sample, with byte-identical download after API restart.
+
+No frontend, automatic scene selection or Remotion integration yet. URL import and reviewed rendering are separate jobs. Next: a review/edit screen and per-phrase voice regeneration. Local design/reference documents live in `docs/`, which is intentionally excluded from Git by this project's configuration.
