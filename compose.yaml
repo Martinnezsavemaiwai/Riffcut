@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: riffcut_dev
       POSTGRES_DB: riffcut
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -37,8 +37,8 @@ services:
       MINIO_ROOT_USER: riffcut_storage
       MINIO_ROOT_PASSWORD: riffcut_dev_storage_only
     ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:${STORAGE_PORT:-9000}:9000"
+      - "127.0.0.1:${STORAGE_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio_data:/data
     healthcheck:
