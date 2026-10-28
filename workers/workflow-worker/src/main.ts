@@ -8,17 +8,19 @@ import { ScriptService } from '../../../packages/core/src/script-service.js';
 import { PgScriptRepository } from '../../../packages/core/src/script-database.js';
 import { configuredScriptProviders } from '../../../packages/core/src/script-providers.js';
 import { PermanentJobError } from '../../../packages/core/src/jobs.js';
+import { configuredUrlImporter } from '../../../packages/core/src/url-runtime.js';
 
 const config = readConfig();
 const pool = createPool(config.databaseUrl);
 const connection = createRedis(config.redisUrl, true);
 const healthRedis = createRedis(config.redisUrl);
 const scripts = new ScriptService(new PgScriptRepository(pool), configuredScriptProviders());
+const importer = configuredUrlImporter(pool, scripts);
 const processJob = createProcessor(pool, async () => {
   await pool.query('SELECT 1');
   if (await healthRedis.ping() !== 'PONG') throw new Error('Redis check failed');
   return { infrastructure: 'ok', checkedAt: new Date().toISOString() };
-}, (projectId, jobId, input) => scripts.generate(projectId, jobId, input));
+}, (projectId, jobId, input, signal) => scripts.generate(projectId, jobId, input, signal), importer ? (projectId, jobId, input, signal) => importer.service.run(projectId, jobId, input, signal) : undefined);
 const payload = z.strictObject({ jobId: z.uuid() });
 const worker = new Worker(QUEUE_NAME, async job => {
   if (!['system_check', 'workflow'].includes(job.name)) throw new UnrecoverableError('Unsupported job kind');
@@ -50,6 +52,7 @@ async function shutdown() {
   await worker.close();
   connection.disconnect();
   healthRedis.disconnect();
+  importer?.close();
   await pool.end();
 }
 process.once('SIGINT', () => { void shutdown(); });

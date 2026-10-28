@@ -7,12 +7,17 @@ import { SourceError, type SourceRepository, type PrivateStorage, type MediaMeta
 export class SourceService {
   constructor(private repository: SourceRepository, private storage: PrivateStorage, private probe: (path: string) => Promise<MediaMetadata>) {}
   async assertProject(id: string) { if (!await this.repository.projectExists(id)) throw new DomainError('NOT_FOUND'); }
-  async ingest(input: { projectId: string; path: string; filename: string; rights: RightsInput }) {
+  async ingest(input: { projectId: string; path: string; filename: string; rights: RightsInput; sourceId?: string }) {
     await this.assertProject(input.projectId);
     const { size } = await stat(input.path);
     if (size <= 0 || size > MAX_UPLOAD_BYTES) throw new SourceError('INVALID_MEDIA', 422, 'Unsupported file size');
     const metadata = await this.probe(input.path);
-    const sourceId = randomUUID(); const assetId = randomUUID();
+    const sourceId = input.sourceId ?? randomUUID(); const assetId = randomUUID();
+    if (input.sourceId) {
+      const existing = await this.repository.getSource(input.projectId, input.sourceId);
+      if (existing?.status === 'ready') return existing;
+      if (existing) throw new SourceError('MEDIA_UNAVAILABLE', 503, 'Previous source upload is incomplete; inspect it before submitting a new import');
+    }
     const key = `projects/${input.projectId}/sources/${sourceId}/original.mp4`;
     await this.repository.beginUpload({ sourceId, assetId, projectId: input.projectId, key, filename: input.filename, sizeBytes: size, metadata, rights: input.rights });
     try { await this.storage.put(key, input.path, size); }

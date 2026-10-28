@@ -1,5 +1,8 @@
-import { createReadStream } from 'node:fs';
-import { S3Client, PutObjectCommand, DeleteObjectCommand, HeadBucketCommand, CreateBucketCommand, GetBucketPolicyCommand } from '@aws-sdk/client-s3';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import { Transform } from 'node:stream';
+import { MAX_UPLOAD_BYTES } from './media.js';
+import { S3Client, PutObjectCommand, DeleteObjectCommand, HeadBucketCommand, CreateBucketCommand, GetBucketPolicyCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import type { PrivateStorage } from './sources.js';
 
 export type StorageConfig = { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string };
@@ -33,5 +36,16 @@ export class S3Storage implements PrivateStorage {
     finally { stream.destroy(); }
   }
   async remove(key: string) { await this.client.send(new DeleteObjectCommand({ Bucket: this.config.bucket, Key: key }), { abortSignal: AbortSignal.timeout(10000) }); }
+  async download(key: string, path: string) {
+    await this.assertPrivate();
+    const result = await this.client.send(new GetObjectCommand({ Bucket: this.config.bucket, Key: key }), { abortSignal: AbortSignal.timeout(30000) });
+    if (!result.Body) throw new Error('Source object unavailable');
+    let bytes = 0;
+    const bound = new Transform({ transform(chunk: Buffer, _encoding, callback) {
+      bytes += chunk.length;
+      if (bytes > MAX_UPLOAD_BYTES) callback(new Error('Stored source exceeds limit')); else callback(null, chunk);
+    } });
+    await pipeline(result.Body as NodeJS.ReadableStream, bound, createWriteStream(path, { flags: 'wx', mode: 0o600 }), { signal: AbortSignal.timeout(30000) });
+  }
   close() { this.client.destroy(); }
 }

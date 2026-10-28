@@ -14,6 +14,11 @@ import { createQueue, enqueueJob } from '../../packages/core/src/queue.js';
 import { PermanentJobError } from '../../packages/core/src/jobs.js';
 import { createProcessor } from '../../workers/workflow-worker/src/processor.js';
 import { migrate } from '../../infra/scripts/migrate.js';
+import { SourceService } from '../../packages/core/src/source-service.js';
+import { UrlImportService } from '../../packages/core/src/url-service.js';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import type pg from 'pg';
 
 const enabled = !!process.env.TEST_DATABASE_URL && !!process.env.TEST_REDIS_URL;
 describe.skipIf(!enabled)('M2 real PostgreSQL/Redis with explicit provider transport fixtures', () => {
@@ -24,6 +29,9 @@ describe.skipIf(!enabled)('M2 real PostgreSQL/Redis with explicit provider trans
   let repository: PgScriptRepository;
   let service: ScriptService;
   let app: ReturnType<typeof createApp>;
+  let imports: UrlImportService;
+  let importedDownloads = 0;
+  let importedTranscripts = 0;
   let worker: Worker | undefined;
   let projectId: string;
   let sourceId: string;
@@ -51,7 +59,7 @@ describe.skipIf(!enabled)('M2 real PostgreSQL/Redis with explicit provider trans
     });
   }
   function startWorker(scriptService = service) {
-    const processor = createProcessor(pool, async () => ({ infrastructure: 'ok' }), (project, job, input) => scriptService.generate(project, job, input));
+    const processor = createProcessor(pool, async () => ({ infrastructure: 'ok' }), (project, job, input, signal) => scriptService.generate(project, job, input, signal), (project, job, input, signal) => imports.run(project, job, input, signal));
     worker = new Worker(queueName, async job => { try { await processor(job.data.jobId); } catch (error) { if (error instanceof PermanentJobError) throw new UnrecoverableError(error.message); throw error; } }, { connection, concurrency: 1 });
     worker.on('error', () => {});
   }
@@ -64,7 +72,9 @@ describe.skipIf(!enabled)('M2 real PostgreSQL/Redis with explicit provider trans
     connection = new Redis(process.env.TEST_REDIS_URL!, { lazyConnect: true, maxRetriesPerRequest: null, connectTimeout: 2000, retryStrategy: () => null }); connection.on('error', () => {}); await connection.connect();
     queue = createQueue(connection, queueName); store = new PgStore(pool); repository = new PgScriptRepository(pool);
     service = new ScriptService(repository, { openai: testProvider('openai'), anthropic: testProvider('anthropic'), ollama: testProvider('ollama') });
-    app = createApp({ store, enqueue, redisReady: async () => true, workerHealthy: async () => true, scripts: service });
+    const sources = new SourceService(new PgSourceRepository(pool), { put: async () => {}, remove: async () => {}, ready: async () => true }, async () => ({ durationMs: 60000, width: 160, height: 90, videoCodec: 'h264', audioCodec: 'aac', hasAudio: true }));
+    imports = new UrlImportService(sources, repository, service, { releaseModel: async () => {}, transcriberModel: 'fixture', download: async (_url, directory) => { importedDownloads++; await writeFile(join(directory, 'source.mp4'), 'explicit test-only media fixture'); return { id: 'fixture', title: 'fixture', duration: 60 }; }, transcribe: async () => { importedTranscripts++; return { ...transcript, language: 'th' }; } }, async (_key, path) => { await writeFile(path, 'explicit restored fixture'); }, 'test-model');
+    app = createApp({ store, enqueue, redisReady: async () => true, workerHealthy: async () => true, scripts: service, imports });
     ({ projectId, sourceId } = await createSource());
     const response = await app.inject({ method: 'POST', url: `/api/projects/${projectId}/sources/${sourceId}/transcripts`, payload: transcript }); expect(response.statusCode).toBe(201); pack = response.json();
   });
@@ -137,6 +147,23 @@ describe.skipIf(!enabled)('M2 real PostgreSQL/Redis with explicit provider trans
     await until(async () => (await store.getJob(id))?.status === 'failed');
     expect((await store.getJob(id))?.error?.code).toBe('GENERATION_UNCERTAIN'); expect(calls.openai).toBe(previousCalls);
   });
+  it('imports an authorized URL through the queue and reuses durable ASR/source checkpoints', async () => {
+    const key = randomUUID();
+    const input = { kind: 'import_url', url: 'https://youtu.be/4WjQ9AMhsPc', rights: { basis: 'permission', attestation: true, notes: 'Explicit test fixture permission' }, targetDurationSeconds: 30 };
+    const submitImport = (payload = input) => app.inject({ method: 'POST', url: `/api/projects/${projectId}/jobs`, headers: { 'idempotency-key': key }, payload });
+    expect((await submitImport({ ...input, rights: { ...input.rights, attestation: false } })).statusCode).toBe(400);
+    expect((await submitImport({ ...input, url: 'https://127.0.0.1/private' })).statusCode).toBe(400);
+    const response = await submitImport(); expect(response.statusCode, response.body).toBe(202); const id = response.json().id;
+    startWorker(); await until(async () => (await store.getJob(id))?.status === 'completed');
+    expect((await repository.getPack(projectId, id))?.provenance).toBe('local_whisper');
+    expect((await store.getJob(id))?.result).toMatchObject({ sourceId: id, knowledgePackId: id });
+    expect((await submitImport()).json().id).toBe(id);
+    expect((await submitImport({ ...input, url: 'https://youtu.be/ef-XuhOQv8g' })).statusCode).toBe(409);
+    const stored = (await pool.query('SELECT input_json FROM jobs WHERE id=$1', [id])).rows[0]!.input_json;
+    await imports.run(projectId, id, stored);
+    expect(importedDownloads).toBe(1); expect(importedTranscripts).toBe(1);
+    expect((await new PgSourceRepository(pool).listSources(projectId)).filter(source => source.id === id)).toHaveLength(1);
+  });
   it('preserves the original model snapshot on replay after provider removal or rotation', async () => {
     const key = randomUUID(); const first = await submit('openai', key); const id = first.json().id;
     const disabled = createApp({ store, enqueue, redisReady: async () => true, workerHealthy: async () => true, scripts: new ScriptService(repository, {}) });
@@ -150,5 +177,24 @@ describe.skipIf(!enabled)('M2 real PostgreSQL/Redis with explicit provider trans
       expect((await pool.query<{ input_json: StoredGenerationInput }>('SELECT input_json FROM jobs WHERE id=$1', [id])).rows[0]!.input_json.model).toBe('test-model');
       startWorker(); await until(async () => (await store.getJob(id))?.status === 'completed');
     } finally { await disabled.close(); }
+  });
+  it('cancels an active job when its real PostgreSQL lock connection is terminated', async () => {
+    const created = await store.createJob(projectId, { kind: 'generate_script', knowledgePackId: pack.id, provider: 'openai', targetDurationSeconds: 30, style: 'summary', model: 'test-model' }, randomUUID());
+    let lockedClient: pg.PoolClient | undefined; let pid = 0; let aborted = false;
+    pool.once('acquire', client => { lockedClient = client; });
+    let announce!: () => void; const started = new Promise<void>(resolve => { announce = resolve; });
+    const processor = createProcessor(pool, async () => ({}), async (_project, _job, _input, signal) => {
+      pid = Number((await lockedClient!.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
+      return new Promise((_resolve, reject) => {
+        signal!.addEventListener('abort', () => { aborted = true; reject(new Error('Connection lost')); }, { once: true });
+        announce();
+      });
+    });
+    const processing = expect(processor(created.job.id)).rejects.toThrow();
+    await started;
+    await pool.query('SELECT pg_terminate_backend($1)', [pid]);
+    await processing;
+    expect(aborted).toBe(true);
+    expect((await pool.query('SELECT 1 AS alive')).rows[0].alive).toBe(1);
   });
 });

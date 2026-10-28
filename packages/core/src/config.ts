@@ -41,3 +41,8 @@ export function readProviderConfig(env: NodeJS.ProcessEnv = process.env) {
   if (localModel.success) config.ollama = { key: '', model: localModel.data };
   return config;
 }
+export function readImportConfig(env: NodeJS.ProcessEnv = process.env) {
+  const parsed = z.object({ IMPORT_PYTHON: z.string().trim().min(1), WHISPER_MODEL_DIR: z.string().trim().min(1), IMPORT_WORK_DIR: z.string().trim().min(1).optional(), WHISPER_DEVICE: z.enum(['cpu', 'cuda']).default('cpu') }).safeParse(env);
+  if (!parsed.success) return undefined;
+  return { python: parsed.data.IMPORT_PYTHON, whisperModel: parsed.data.WHISPER_MODEL_DIR, workRoot: parsed.data.IMPORT_WORK_DIR, device: parsed.data.WHISPER_DEVICE };
+}

@@ -12,8 +12,8 @@ const outputSchema = z.object({
   format: z.object({ format_name: z.string(), duration: z.coerce.number().finite().positive().max(600) }),
   streams: z.array(z.object({ codec_type: z.string(), codec_name: z.string(), width: z.number().int().positive().optional(), height: z.number().int().positive().optional(), disposition: z.object({ attached_pic: z.number().optional() }).optional() })).max(3),
 });
-export function parseProbe(output: unknown): MediaMetadata {
-  const parsed = outputSchema.safeParse(output);
+export function parseProbe(output: unknown, maxDurationSeconds = 600): MediaMetadata {
+  const parsed = outputSchema.extend({ format: outputSchema.shape.format.extend({ duration: z.coerce.number().finite().positive().max(maxDurationSeconds) }) }).safeParse(output);
   if (!parsed.success) throw new SourceError('INVALID_MEDIA', 422, 'Unsupported or invalid video');
   const { format, streams } = parsed.data;
   const video = streams.filter(stream => stream.codec_type === 'video' && !stream.disposition?.attached_pic);
@@ -28,7 +28,7 @@ export function probeArguments(path: string, name: string, image: string) {
   const user = `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`;
   return ['run', '--rm', '--name', name, '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--memory', '256m', '--cpus', '1', '--pids-limit', '64', '--user', user, '--mount', `type=bind,source=${resolve(path)},target=/input/source.mp4,readonly`, image, 'ffprobe', '-v', 'error', '-protocol_whitelist', 'file', '-format_whitelist', 'mov', '-probesize', '5000000', '-analyzeduration', '5000000', '-show_entries', 'format=format_name,duration:stream=codec_type,codec_name,width,height:stream_disposition=attached_pic', '-of', 'json', '/input/source.mp4'];
 }
-export async function probeFile(path: string, docker = 'docker', image = 'riffcut-media:dev') {
+export async function probeFile(path: string, docker = 'docker', image = 'riffcut-media:dev', maxDurationSeconds = 600) {
   const handle = await open(path, 'r');
   try {
     const header = Buffer.alloc(12); const { bytesRead } = await handle.read(header, 0, 12, 0);
@@ -37,7 +37,7 @@ export async function probeFile(path: string, docker = 'docker', image = 'riffcu
   const name = `riffcut-probe-${randomUUID()}`;
   try {
     const { stdout } = await run(docker, probeArguments(path, name, image), { timeout: 30000, maxBuffer: 256 * 1024, windowsHide: true });
-    return parseProbe(JSON.parse(stdout));
+    return parseProbe(JSON.parse(stdout), maxDurationSeconds);
   } catch (error) {
     if (error instanceof SourceError) throw error;
     // Docker infrastructure errors must not be reported as corrupt user media.

@@ -6,4 +6,6 @@ dist/
 .env.*
 !.env.example
 coverage/
+__pycache__/
+*.pyc
 docs/

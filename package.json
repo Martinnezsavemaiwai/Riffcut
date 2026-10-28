@@ -16,7 +16,7 @@
     "db:migrate": "node --env-file=.env --import tsx infra/scripts/migrate.ts",
     "storage:init": "node --env-file=.env --import tsx infra/scripts/storage-init.ts",
     "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json && node --input-type=module -e \"import { cpSync } from 'node:fs'; cpSync('infra/migrations', 'dist/infra/migrations', { recursive: true });\"",
+    "build": "tsc -p tsconfig.build.json && node --input-type=module -e \"import { cpSync } from 'node:fs'; cpSync('infra/migrations', 'dist/infra/migrations', { recursive: true }); cpSync('infra/python', 'dist/infra/python', { recursive: true });\"",
     "lint": "eslint .",
     "test": "vitest run --exclude 'tests/integration/**'",
     "test:integration": "vitest run tests/integration/m0.test.ts tests/integration/m1.test.ts tests/integration/m2.test.ts",

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { generationInput, storedGenerationInput } from './script-contracts.js';
+import { importInput, storedImportInput } from './url-contracts.js';
 
 export const uuid = z.uuid();
 export const projectInput = z.strictObject({
@@ -10,14 +11,15 @@ export const projectInput = z.strictObject({
   }).default({ language: 'th', targetDurationSeconds: 60 }),
 });
 const checkInput = z.strictObject({ kind: z.literal('system_check') });
-export const jobInput = z.discriminatedUnion('kind', [checkInput, generationInput]);
-export const storedJobInput = z.discriminatedUnion('kind', [checkInput, storedGenerationInput]);
+export const jobInput = z.discriminatedUnion('kind', [checkInput, generationInput, importInput]);
+export const storedJobInput = z.discriminatedUnion('kind', [checkInput, storedGenerationInput, storedImportInput]);
 export const idempotencyKey = z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/);
 export type ProjectInput = z.infer<typeof projectInput>;
 export type JobInput = z.infer<typeof jobInput>;
 export type StoredJobInput = z.infer<typeof storedJobInput>;
 export function jobRequest(input: StoredJobInput): JobInput {
   if (input.kind === 'system_check') return input;
+  if (input.kind === 'import_url') return { kind: input.kind, url: input.url, rights: input.rights, targetDurationSeconds: input.targetDurationSeconds, style: input.style };
   return { kind: input.kind, knowledgePackId: input.knowledgePackId, provider: input.provider, targetDurationSeconds: input.targetDurationSeconds, style: input.style };
 }
 export type Project = ProjectInput & { id: string; createdAt: string };

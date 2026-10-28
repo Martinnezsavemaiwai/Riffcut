@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { readConfig, readStorageConfig, readProviderConfig } from '../packages/core/src/config.js';
+import { readConfig, readStorageConfig, readProviderConfig, readImportConfig } from '../packages/core/src/config.js';
 
 const env = { DATABASE_URL: 'postgres://user:pass@localhost:5432/riffcut', REDIS_URL: 'redis://localhost:6379' };
+it('requires local import tools, defaults to CPU and validates the CUDA setting', () => {
+  expect(readImportConfig({})).toBeUndefined();
+  expect(readImportConfig({ IMPORT_PYTHON: 'python' })).toBeUndefined();
+  const local = { IMPORT_PYTHON: 'python', WHISPER_MODEL_DIR: 'D:/models/small' };
+  expect(readImportConfig(local)?.device).toBe('cpu');
+  expect(readImportConfig({ ...local, WHISPER_DEVICE: 'cuda' })?.device).toBe('cuda');
+  expect(readImportConfig({ ...local, WHISPER_DEVICE: 'invalid' })).toBeUndefined();
+});
 describe('environment configuration', () => {
   it('uses local defaults and validates service URLs', () => {
     expect(readConfig(env)).toMatchObject({ host: '127.0.0.1', port: 3001 });

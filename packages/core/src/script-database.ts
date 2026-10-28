@@ -7,16 +7,21 @@ type ScriptRow = { id: string; project_id: string; knowledge_pack_id: string; ve
 function scriptFrom(row: ScriptRow): ScriptVersion { return { ...row.body_json, id: row.id, projectId: row.project_id, knowledgePackId: row.knowledge_pack_id, version: row.version, parentId: row.parent_id, targetDurationSeconds: row.target_duration_seconds, origin: row.origin, provider: row.provider, model: row.model, createdAt: row.created_at.toISOString() }; }
 export class PgScriptRepository implements ScriptRepository {
   constructor(private pool: pg.Pool) {}
-  async createPack(projectId: string, sourceId: string, input: TranscriptInput) {
+  async createPack(projectId: string, sourceId: string, input: TranscriptInput, options?: { id: string; provenance: 'local_whisper'; model?: string }) {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
       const { rows } = await client.query<{ status: string; metadata_json: { durationMs: number }; asset_id: string }>('SELECT s.status,s.metadata_json,a.id AS asset_id FROM sources s JOIN assets a ON a.source_id=s.id WHERE s.project_id=$1 AND s.id=$2 FOR UPDATE OF s', [projectId, sourceId]);
       const source = rows[0]; if (!source) throw new DomainError('NOT_FOUND');
       if (source.status !== 'ready') throw new ScriptError('SOURCE_NOT_READY', 409, 'Source is not ready');
+      if (options) {
+        const existing = await client.query<{ pack_json: KnowledgePack }>('SELECT pack_json FROM knowledge_packs WHERE id=$1 AND source_id=$2 AND project_id=$3', [options.id, sourceId, projectId]);
+        if (existing.rows[0]) { await client.query('COMMIT'); return existing.rows[0].pack_json; }
+      }
       const validated = validateTranscript(input, source.metadata_json.durationMs);
       const versions = await client.query<{ version: number }>('SELECT COALESCE(MAX(version),0)+1 AS version FROM knowledge_packs WHERE source_id=$1', [sourceId]);
-      const pack: KnowledgePack = { id: randomUUID(), projectId, sourceId, assetId: source.asset_id, version: versions.rows[0]!.version, schemaVersion: 1, language: validated.language, durationMs: source.metadata_json.durationMs, provenance: 'user_supplied_transcript', scenes: [], transcriptSegments: validated.segments.map(segment => ({ ...segment, id: randomUUID() })), createdAt: new Date().toISOString() };
+      const pack: KnowledgePack = { id: options?.id ?? randomUUID(), projectId, sourceId, assetId: source.asset_id, version: versions.rows[0]!.version, schemaVersion: 1, language: validated.language, durationMs: source.metadata_json.durationMs, provenance: options?.provenance ?? 'user_supplied_transcript', scenes: [], transcriptSegments: validated.segments.map(segment => ({ ...segment, id: randomUUID() })), createdAt: new Date().toISOString() };
+      if (options?.model) pack.transcription = { engine: 'faster-whisper', model: options.model };
       await client.query('INSERT INTO knowledge_packs (id,project_id,source_id,version,pack_json) VALUES ($1,$2,$3,$4,$5)', [pack.id, projectId, sourceId, pack.version, pack]);
       await client.query('COMMIT'); return pack;
     } catch (error) { await client.query('ROLLBACK'); throw error; }
