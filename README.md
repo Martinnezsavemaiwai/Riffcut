@@ -101,6 +101,34 @@ Generation uses the existing background queue. Model settings are snapshotted wh
 
 ## Validation
 
+### Authorized YouTube and TikTok URL imports
+
+After configuring local Ollama, install `infra/python/requirements.txt` in a Python 3.12 environment. Download a Whisper model into a local directory using Hugging Face's `snapshot_download` before processing videos. For the tested Thai animation clips, `small` produced inaccurate text; use [Whisper large-v3-turbo for CTranslate2](https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo) on CUDA instead and still review recognition quality. Runtime transcription uses local files only. Configure `IMPORT_PYTHON`, `WHISPER_MODEL_DIR`, optionally `IMPORT_WORK_DIR`, and `WHISPER_DEVICE=cpu` (or `cuda` with compatible cuBLAS/cuDNN). On Windows the helper discovers installed NVIDIA Python-package DLL directories. Restart API/worker and apply migrations. The build includes the Python tool next to compiled sources.
+
+```powershell
+$body = @{
+  kind = 'import_url'
+  url = 'https://youtu.be/your-video-id'
+  rights = @{ basis = 'permission'; attestation = $true; notes = 'Describe your authorization' }
+  targetDurationSeconds = 60
+  style = 'summary'
+} | ConvertTo-Json -Depth 4
+$job = Invoke-RestMethod "http://127.0.0.1:3001/api/projects/$($project.id)/jobs" -Method Post -ContentType application/json -Headers @{ 'Idempotency-Key' = 'url-import-1' } -Body $body
+Invoke-RestMethod "http://127.0.0.1:3001/api/jobs/$($job.id)"
+```
+
+The job reports downloading, transcribing and generating_script stages in `result.stage` while running. On completion it returns `sourceId`, `knowledgePackId`, `scriptId`, version and known local token usage. Existing source/script endpoints read the artifacts. Matching submissions reuse the job; changed public input under the same key returns409. Import jobs always use local Ollama; they never choose OpenAI/Claude automatically.
+
+Supported inputs are HTTPS single YouTube watch/short/share URLs and TikTok video/short share URLs. Playlists, live streams, login/cookie-required media and arbitrary hosts are excluded. Metadata must indicate <=30 minutes. Downloads choose H264 MP4 up to480p where available (combined MP4 fallback <=720p), cap each remote stream at125MiB, and validate the normalized source against250MiB and measured30-minute limits. Original multipart uploads retain their10-minute limit. Platform changes or blocked downloads may require an updated yt-dlp; TikTok code support does not imply every live TikTok URL has been verified.
+
+yt-dlp runs without user config, browser cookies or API credentials. Separate downloads are normalized and decoded to mono16kHz PCM in network-disabled Docker containers. Whisper receives PCM samples rather than untrusted source codecs. Its Thai transcript is saved with `local_whisper` provenance and validated timestamps. ASR can mishear names/dialogue, especially over music; grounding checks prove consistency with the transcript, not correctness of speech recognition.
+
+Knowledge Packs record the configured local transcription model. Before CUDA transcription the importer unloads its selected Ollama model and recently used Riffcut models recorded in the database through bounded loopback requests, then the Whisper subprocess exits before script generation. This supports model rotation while sharing limited VRAM; unrelated model names are not unloaded. Use one workflow worker on a shared GPU. Failed GPU handoff stops the import rather than risking an automatic paid fallback. Loss of the PostgreSQL job-lock connection aborts active subprocesses/fetches; Windows descendant cancellation and real connection termination have regression coverage.
+
+For long transcripts, bounded local selection passes read every chunk and retain source UUIDs/verbatim excerpts before final script generation. There are at most64 local calls and4 reduction passes; token usage is summed. Selection is lossy and does not guarantee a comprehensive recap. Source/pack checkpoints reuse archived bytes and avoid duplicate versions after retry; a failed/uncertain model call still requires a new job. An incomplete source upload is preserved for inspection rather than silently replaced. Work folders are cleaned on normal exit; an OS termination can leave temporary folders under IMPORT_WORK_DIR.
+
+Compose host ports may be overridden with `POSTGRES_PORT`, `STORAGE_PORT`, `STORAGE_CONSOLE_PORT`; update `.env` service URLs to match. This preserves existing volumes and avoids stopping unrelated projects.
+
 ### Local script generation with Ollama
 
 Install [Ollama for Windows](https://docs.ollama.com/windows), then run `ollama pull qwen3:4b`.
@@ -109,7 +137,7 @@ Set `OLLAMA_MODELS` in your Windows user environment before starting Ollama to s
 Add `OLLAMA_MODEL=qwen3:4b` to your untracked `.env`, run `npm run db:migrate`, and restart API and worker.
 Submit the same `generate_script` request with `provider: "ollama"`. The model is snapshotted and scripts/evidence are validated and versioned through the existing workflow.
 
-The adapter calls only `http://127.0.0.1:11434/api/chat`, rejects redirects, and never falls back to paid providers. It uses JSON Schema, disables thinking, caps context at 16384 tokens and output at 4000 tokens, and allows 180 seconds for local generation. Local input is conservatively limited to 12000 UTF-8 bytes including instructions; split longer transcripts before submitting. Successful output must still pass reference/quote and estimated duration validation; this does not establish factual entailment or speech duration. Local token usage is recorded, monetary cost remains null (no provider charge is made, but electricity/hardware are not priced).
+The adapter calls only `http://127.0.0.1:11434/api/chat`, rejects redirects, and never falls back to paid providers. It uses JSON Schema, disables thinking, caps context at 16384 tokens and output at 4000 tokens, and allows 180 seconds for local generation. Each local call is conservatively limited to 12000 UTF-8 bytes including instructions. Longer transcripts pass through bounded evidence selection before final generation; every chunk is visited, but selection can omit details. Successful output must still pass reference/quote and estimated duration validation; this does not establish factual entailment or speech duration. Local token usage is recorded, monetary cost remains null (no provider charge is made, but electricity/hardware are not priced).
 
 To keep the small local model reliable, local output uses one to three segments (based on source segment count), with an equal share of the target duration assigned to each segment by the schema. These are pacing budgets, not measured speech lengths. Reference IDs and bounded verbatim excerpts are constrained to source values; the existing validator still rejects mismatched reference/quote pairs. Voice duration must be measured in the voice milestone.
 
@@ -120,7 +148,7 @@ $env:RUN_OLLAMA_LIVE_TESTS = '1'
 node --env-file=.env node_modules/vitest/vitest.mjs run tests/live/ollama.test.ts
 ```
 
-This adds local script generation only. URL downloading, automatic transcription, voice generation and rendering remain separate milestones. Quality and speed need evaluation on representative Thai content; GPU memory is shared with other applications.
+Authorized URL jobs add local transcription before generation. Voice generation and rendering remain separate milestones. Quality and speed need evaluation on representative Thai content; GPU memory is shared with other applications.
 
 ```powershell
 npm run lint
@@ -128,6 +156,7 @@ npm run typecheck
 npm test
 npm run build
 npm audit
+python -m unittest discover -s infra/python -p 'test_*.py'
 ```
 
 Run integration tests only against a **dedicated test database and Redis instance**. Tests migrate the database and use a random queue name, then delete only their own projects/jobs and queue keys. They do not truncate application tables or flush Redis.
@@ -176,4 +205,20 @@ Press Ctrl+C in API/worker terminals. `docker compose down` stops dependencies a
 
 ## Scope and next milestone
 
-No frontend, automatic speech transcription, scene analysis, voice generation, final rendering, URL downloads, or Remotion integration yet. M3 adds an ElevenLabs voice adapter, per-sentence audio regeneration and measured durations. Local design/reference documents live in `docs/`, which is intentionally excluded from Git by this project's configuration.
+### Local editorial MP4 preview
+
+`infra/python/render_preview.py` produces a 720×1280 MP4 from a **reviewed edit manifest**, a Knowledge Pack and an existing authorized local source MP4. This is a separate preview CLI; URL jobs do not yet produce videos automatically. Narration is editorially corrected, with original transcript evidence retained. It supports local CPU MMS Thai or FastThaiG2P/Kokoro Thai speech synthesis and FFmpeg/libass. The revised preview uses locally supplied Kanit Bold fonts, short highlighted captions, measured phrase pauses and an original procedural suspense soundtrack with speech ducking. No paid service or upload is involved.
+
+Install `infra/python/requirements-preview.txt` in a dedicated Python environment and download `facebook/mms-tts-tha` before running. For `--voice-engine fastthai`, download `kokoro_thai.onnx`, `thai_som.npy` and `config.json` from [FastThaiG2P v0.3.0](https://github.com/awslabs/FastThaiG2P/releases/tag/v0.3.0) into a model directory. Explicit local paths avoid runtime model downloads; the upstream repository is Apache-2.0. Supply Kanit Bold plus its OFL license in a local directory with `--fonts`. The [Meta MMS Thai model](https://huggingface.co/facebook/mms-tts-tha) is licensed CC-BY-NC 4.0; this voice is for noncommercial previews. Source media authorization is separate.
+
+```powershell
+python infra/python/render_preview.py --manifest D:/previews/edit.json --pack D:/previews/pack.json --source D:/previews/source.mp4 --model D:/models/mms-tts-tha --output D:/previews/new-render
+```
+
+The manifest requires `title`, `reviewed: true`, `rightsConfirmed: true` and `segments`. Each segment contains `text`, 1–4 `captions` lines (up to 44 characters each, matching narration), `sourceStartMs`, `sourceEndMs` and `evidence` with original `segmentId`/verbatim `quote`. Reviewed footage must overlap cited evidence. Validation establishes reference consistency; the editor remains responsible for meaning.
+
+For the revised style, add `--voice-engine fastthai --fonts D:/fonts/Kanit --soundtrack` and point `--model` at the FastThaiG2P directory. The styled mode requires explicit `phrases` with short `text` (up to 44 characters) and `pauseMs` (0–800); concatenated phrase text must match the reviewed narration. `keywords` highlight exact displayed substrings. Each phrase is synthesized separately and measured; caption boundaries follow these samples rather than estimated character ratios.
+
+The output directory must be new. It retains per-line WAVs, measured timing, edit manifest in `report.json`, subtitle ASS, intermediate parts and `preview.mp4`. Voice samples determine duration, including a 250ms pause per line; insufficient footage and previews outside 30–60 seconds are rejected. Source dialogue is replaced by narration. Footage keeps its full frame with padding. Legacy captions split an utterance proportionally; the revised style uses measured phrases with controlled pauses, not word-level forced alignment. The original generated sound bed adds soft pulses and transition swells; FFmpeg sidechain compression lowers it during narration. Per-part frame/AAC rounding can still cause small offsets, so inspect final MP4 duration. No API job, voice version persistence or production rendering is added by this preview.
+
+No frontend, scene analysis, production voice/render jobs or Remotion integration yet. Authorized public URL jobs add automatic Thai transcription and local script generation; the separate editorial preview CLI can produce a first local MP4. M3 adds persisted voice versions, per-sentence audio regeneration and measured durations. Local design/reference documents live in `docs/`, which is intentionally excluded from Git by this project's configuration.
