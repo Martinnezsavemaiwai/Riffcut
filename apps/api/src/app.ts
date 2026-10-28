@@ -8,6 +8,8 @@ import { ScriptError } from '../../../packages/core/src/script-contracts.js';
 import { registerScriptRoutes, type ScriptApi } from './script-routes.js';
 import { ImportError } from '../../../packages/core/src/url-contracts.js';
 import type { UrlImportService } from '../../../packages/core/src/url-service.js';
+import { RenderError } from '../../../packages/core/src/render-contracts.js';
+import type { RenderService } from '../../../packages/core/src/render-service.js';
 
 export type AppDependencies = {
   store: Store;
@@ -17,11 +19,12 @@ export type AppDependencies = {
   sources?: SourceApi;
   scripts?: ScriptApi;
   imports?: Pick<UrlImportService, 'prepare'>;
+  renders?: Pick<RenderService, 'prepare' | 'download'>;
 };
 export function createApp(deps: AppDependencies) {
   const app = Fastify({ bodyLimit: 65536, requestTimeout: 120000, logger: false });
   app.setErrorHandler<Error & { statusCode?: number; code?: string }>((error, _request, reply) => {
-    if (error instanceof SourceError || error instanceof ScriptError || error instanceof ImportError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+    if (error instanceof SourceError || error instanceof ScriptError || error instanceof ImportError || error instanceof RenderError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
     if (error instanceof ZodError || error.statusCode === 400) return reply.code(400).send({ error: { code: 'INVALID_INPUT', message: 'Invalid request' } });
     if (error.statusCode === 413) return reply.code(413).send({ error: { code: 'BODY_TOO_LARGE', message: 'Request body is too large' } });
     if (error.statusCode === 415) return reply.code(415).send({ error: { code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Use application/json' } });
@@ -50,6 +53,9 @@ export function createApp(deps: AppDependencies) {
       } else if (input.kind === 'import_url') {
         if (!deps.imports) throw new ImportError('IMPORT_UNAVAILABLE', 503, 'URL imports are not configured');
         stored = await deps.imports.prepare(projectId, input);
+      } else if (input.kind === 'render_video') {
+        if (!deps.renders) throw new RenderError('RENDER_UNAVAILABLE', 503, 'Local render tools are not configured');
+        stored = await deps.renders.prepare(projectId, input);
       } else { stored = input; }
       submission = await deps.store.createJob(projectId, stored, key);
     }
@@ -75,5 +81,9 @@ export function createApp(deps: AppDependencies) {
   });
   if (deps.sources) registerSourceRoutes(app, deps.sources);
   if (deps.scripts) registerScriptRoutes(app, deps.scripts);
+  if (deps.renders) app.get<{ Params: { id: string; renderId: string } }>('/api/projects/:id/renders/:renderId/video', async (request, reply) => {
+    const stream = await deps.renders!.download(uuid.parse(request.params.id), uuid.parse(request.params.renderId));
+    return reply.type('video/mp4').header('content-disposition', 'attachment; filename="riffcut.mp4"').header('cache-control', 'no-store').send(stream);
+  });
   return app;
 }

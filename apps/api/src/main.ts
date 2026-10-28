@@ -11,6 +11,7 @@ import { ScriptService } from '../../../packages/core/src/script-service.js';
 import { PgScriptRepository } from '../../../packages/core/src/script-database.js';
 import { configuredScriptProviders } from '../../../packages/core/src/script-providers.js';
 import { configuredUrlImporter } from '../../../packages/core/src/url-runtime.js';
+import { configuredRenderer } from '../../../packages/core/src/render-runtime.js';
 
 const config = readConfig();
 const storageConfig = readStorageConfig();
@@ -22,7 +23,8 @@ const enqueue = (id: string) => enqueueJob(queue, id);
 const sources = new SourceService(new PgSourceRepository(pool), storage, path => probeFile(path, storageConfig.docker, storageConfig.image));
 const scripts = new ScriptService(new PgScriptRepository(pool), configuredScriptProviders());
 const importer = configuredUrlImporter(pool, scripts);
-const app = createApp({ store: new PgStore(pool), enqueue, redisReady: async () => (await redis.ping()) === 'PONG', workerHealthy: () => workerHealthy(redis), sources, scripts, imports: importer?.service });
+const renderer = configuredRenderer(pool);
+const app = createApp({ store: new PgStore(pool), enqueue, redisReady: async () => (await redis.ping()) === 'PONG', workerHealthy: () => workerHealthy(redis), sources, scripts, imports: importer?.service, renders: renderer?.service });
 let reconciling = false;
 async function reconcile() {
   if (reconciling) return;
@@ -47,6 +49,7 @@ async function shutdown() {
   redis.disconnect();
   storage.close();
   importer?.close();
+  renderer?.close();
   await pool.end();
 }
 process.once('SIGINT', () => { void shutdown(); });

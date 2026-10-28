@@ -46,3 +46,9 @@ export function readImportConfig(env: NodeJS.ProcessEnv = process.env) {
   if (!parsed.success) return undefined;
   return { python: parsed.data.IMPORT_PYTHON, whisperModel: parsed.data.WHISPER_MODEL_DIR, workRoot: parsed.data.IMPORT_WORK_DIR, device: parsed.data.WHISPER_DEVICE };
 }
+export function readRenderConfig(env: NodeJS.ProcessEnv = process.env) {
+  const parsed = z.object({ RENDER_PYTHON: z.string().trim().min(1), RENDER_MODEL_DIR: z.string().trim().min(1), RENDER_FONTS_DIR: z.string().trim().min(1), RENDER_PROFILE: z.string().regex(/^[a-zA-Z0-9._-]{1,100}$/), RENDER_WORK_DIR: z.string().trim().min(1).optional(), FFMPEG_BIN: z.string().trim().min(1).default('ffmpeg'), FFPROBE_BIN: z.string().trim().min(1).default('ffprobe') }).safeParse(env);
+  if (!parsed.success) return undefined;
+  const v = parsed.data;
+  return { python: v.RENDER_PYTHON, model: v.RENDER_MODEL_DIR, fonts: v.RENDER_FONTS_DIR, profile: v.RENDER_PROFILE, workRoot: v.RENDER_WORK_DIR, ffmpeg: v.FFMPEG_BIN, ffprobe: v.FFPROBE_BIN };
+}

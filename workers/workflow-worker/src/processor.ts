@@ -4,8 +4,9 @@ import { storedJobInput, type Job } from '../../../packages/core/src/contracts.j
 import { ScriptError, type StoredGenerationInput } from '../../../packages/core/src/script-contracts.js';
 import { ImportError, type StoredImportInput } from '../../../packages/core/src/url-contracts.js';
 import { SourceError } from '../../../packages/core/src/sources.js';
+import { RenderError, type StoredRenderInput } from '../../../packages/core/src/render-contracts.js';
 
-export function createProcessor(pool: pg.Pool, check: () => Promise<Record<string, unknown>>, generateScript?: (projectId: string, jobId: string, input: StoredGenerationInput, signal?: AbortSignal) => Promise<Record<string, unknown>>, importUrl?: (projectId: string, jobId: string, input: StoredImportInput, signal?: AbortSignal) => Promise<Record<string, unknown>>) {
+export function createProcessor(pool: pg.Pool, check: () => Promise<Record<string, unknown>>, generateScript?: (projectId: string, jobId: string, input: StoredGenerationInput, signal?: AbortSignal) => Promise<Record<string, unknown>>, importUrl?: (projectId: string, jobId: string, input: StoredImportInput, signal?: AbortSignal) => Promise<Record<string, unknown>>, renderVideo?: (projectId: string, jobId: string, input: StoredRenderInput, signal?: AbortSignal) => Promise<Record<string, unknown>>) {
   return async (id: string) => {
     const client = await pool.connect();
     let locked = false;
@@ -32,11 +33,16 @@ export function createProcessor(pool: pg.Pool, check: () => Promise<Record<strin
       const { rows } = await client.query<{ project_id: string; kind: string; input_json: unknown }>('SELECT project_id,kind,input_json FROM jobs WHERE id=$1', [id]);
       const row = rows[0];
       if (!row) throw new Error('Job not found');
-      const failure = row.kind === 'import_url' ? { code: 'URL_IMPORT_FAILED', message: 'URL import failed' } : row.kind === 'generate_script' ? { code: 'SCRIPT_GENERATION_FAILED', message: 'Script generation failed' } : CHECK_ERROR;
+      const failure = row.kind === 'render_video' ? { code: 'VIDEO_RENDER_FAILED', message: 'Video rendering failed' } : row.kind === 'import_url' ? { code: 'URL_IMPORT_FAILED', message: 'URL import failed' } : row.kind === 'generate_script' ? { code: 'SCRIPT_GENERATION_FAILED', message: 'Script generation failed' } : CHECK_ERROR;
       await runJob(id, store, async () => {
         const parsed = storedJobInput.safeParse(row.input_json);
         if (!parsed.success || parsed.data.kind !== row.kind) throw new PermanentJobError({ code: 'INVALID_JOB_INPUT', message: 'Job input is invalid' });
         if (parsed.data.kind === 'system_check') return check();
+        if (parsed.data.kind === 'render_video') {
+          if (!renderVideo) throw new PermanentJobError({ code: 'RENDER_UNAVAILABLE', message: 'Local renderer is not configured' });
+          try { return await renderVideo(row.project_id, id, parsed.data, controller.signal); }
+          catch (error) { if (error instanceof RenderError) throw new PermanentJobError({ code: error.code, message: error.message }); throw error; }
+        }
         if (parsed.data.kind === 'import_url') {
           if (!importUrl) throw new PermanentJobError({ code: 'IMPORT_UNAVAILABLE', message: 'URL import is not configured' });
           try { return await importUrl(row.project_id, id, parsed.data, controller.signal); }

@@ -1,6 +1,6 @@
 import { createReadStream, createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
-import { Transform } from 'node:stream';
+import { Transform, Readable } from 'node:stream';
 import { MAX_UPLOAD_BYTES } from './media.js';
 import { S3Client, PutObjectCommand, DeleteObjectCommand, HeadBucketCommand, CreateBucketCommand, GetBucketPolicyCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import type { PrivateStorage } from './sources.js';
@@ -29,10 +29,10 @@ export class S3Storage implements PrivateStorage {
     }
   }
   async ready() { await this.client.send(new HeadBucketCommand({ Bucket: this.config.bucket }), { abortSignal: AbortSignal.timeout(5000) }); await this.assertPrivate(); return true; }
-  async put(key: string, path: string, size: number) {
+  async put(key: string, path: string, size: number, contentType = 'video/mp4') {
     await this.assertPrivate();
     const stream = createReadStream(path);
-    try { await this.client.send(new PutObjectCommand({ Bucket: this.config.bucket, Key: key, Body: stream, ContentLength: size, ContentType: 'video/mp4' }), { abortSignal: AbortSignal.timeout(30000) }); }
+    try { await this.client.send(new PutObjectCommand({ Bucket: this.config.bucket, Key: key, Body: stream, ContentLength: size, ContentType: contentType }), { abortSignal: AbortSignal.timeout(30000) }); }
     finally { stream.destroy(); }
   }
   async remove(key: string) { await this.client.send(new DeleteObjectCommand({ Bucket: this.config.bucket, Key: key }), { abortSignal: AbortSignal.timeout(10000) }); }
@@ -46,6 +46,28 @@ export class S3Storage implements PrivateStorage {
       if (bytes > MAX_UPLOAD_BYTES) callback(new Error('Stored source exceeds limit')); else callback(null, chunk);
     } });
     await pipeline(result.Body as NodeJS.ReadableStream, bound, createWriteStream(path, { flags: 'wx', mode: 0o600 }), { signal: AbortSignal.timeout(30000) });
+  }
+  async open(key: string) {
+    await this.assertPrivate();
+    const result = await this.client.send(new GetObjectCommand({ Bucket: this.config.bucket, Key: key }), { abortSignal: AbortSignal.timeout(30000) });
+    const body = result.Body as Readable | undefined;
+    if (!body || !result.ContentLength || result.ContentLength > MAX_UPLOAD_BYTES) { body?.destroy(); throw new Error('Invalid stored video'); }
+    const output = Readable.from((async function* () {
+      let bytes = 0;
+      try {
+        for await (const chunk of body) {
+          bytes += (chunk as Buffer).length;
+          if (bytes > MAX_UPLOAD_BYTES) throw new Error('Stored video exceeds limit');
+          yield chunk;
+        }
+      } finally { body.destroy(); }
+    })(), { objectMode: false });
+    const forwardError = (error: Error) => { output.destroy(error); };
+    const cleanup = () => { body.off('error', forwardError); body.destroy(); };
+    body.once('error', forwardError);
+    output.once('close', cleanup);
+    output.once('error', cleanup);
+    return output;
   }
   close() { this.client.destroy(); }
 }
